@@ -1,0 +1,46 @@
+xa_id,ten_day_du,loai,stt_nq,lat,lon,ffpi,sz_lat,sz_lon,sz_ten,so_diem_do,trang_thai,hop_thanh_tu,nguon_toa_do,do_tin_cay
+muong_nhe,Xã Mường Nhé,xa,1,22.2642,102.3732,,22.1946,102.4534,Trường Trung học cơ sở Mường Nhé,3,active,Nậm Vì + Chung Chải + Mường Nhé,OSM:ten_moi,OSM tên mới — nên kiểm lại
+sin_thau,Xã Sín Thầu,xa,2,22.3758,102.2540,,22.3742,102.2519,Trường Trung học cơ sở Sín Thầu,3,active,Sen Thượng + Leng Su Sìn + Sín Thầu,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_toong,Xã Mường Toong,xa,3,22.1575,102.5725,,,,chưa tìm được — hỏi cán bộ xã,2,active,Huổi Lếch + Mường Toong,OSM:ten_moi,OSM tên mới — nên kiểm lại
+nam_ke,Xã Nậm Kè,xa,4,22.0620,102.5144,,22.1915,102.4606,Bưu điện huyện Mường Nhé,2,active,Pá Mỳ + Nậm Kè,OSM:ten_moi,OSM tên mới — nên kiểm lại
+quang_lam,Xã Quảng Lâm,xa,5,21.9860,102.6032,,,,chưa tìm được — hỏi cán bộ xã,2,active,Na Cô Sa + Quảng Lâm,OSM:ten_moi,OSM tên mới — nên kiểm lại
+na_hy,Xã Nà Hỳ,xa,6,21.8333,102.7326,,,,chưa tìm được — hỏi cán bộ xã,4,active,Nà Khoa + Nậm Nhừ + Nậm Chua + Nà Hỳ,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_cha,Xã Mường Chà,xa,7,21.8273,103.1428,,21.7646,103.0942,Trường tiểu học thị trấn Mường Chà,4,active,Chà Cang + Chà Nưa + Nậm Tin + Pa Tần,OSM:ten_moi,OSM tên mới — nên kiểm lại
+na_bung,Xã Nà Bủng,xa,8,21.7258,102.7160,,,,chưa tìm được — hỏi cán bộ xã,2,active,Vàng Đán + Nà Bủng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+cha_to,Xã Chà Tở,xa,9,21.9897,102.9376,,,,chưa tìm được — hỏi cán bộ xã,2,active,Nậm Khăn + Chà Tở,OSM:ten_moi,OSM tên mới — nên kiểm lại
+si_pa_phin,Xã Si Pa Phìn,xa,10,21.8098,102.9202,,,,chưa tìm được — hỏi cán bộ xã,2,active,Phìn Hồ + Si Pa Phìn,OSM:ten_moi,OSM tên mới — nên kiểm lại
+na_sang,Xã Na Sang,xa,11,21.7587,103.0905,,21.7471,103.0901,Trường Phổ thông dân tộc nội trú Trung học phổ thông Na Sang,4,active,TT Mường Chà + Ma Thì Hồ + Sa Lông + Na Sang,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_tung,Xã Mường Tùng,xa,12,21.9520,103.0926,,21.8781,103.1330,Trường Trung học cơ sở Huổi Lèng,2,active,Huổi Lèng + Mường Tùng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+pa_ham,Xã Pa Ham,xa,13,21.9312,103.2376,,21.7982,103.2937,Đập thủy điện Nậm Mức,2,active,Hừa Ngài + Pa Ham,OSM:ten_moi,OSM tên mới — nên kiểm lại
+nam_nen,Xã Nậm Nèn,xa,14,21.8044,103.2258,,21.6547,103.2169,Tỉnh Điện Biên,2,active,Huổi Mí + Nậm Nèn,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_pon,Xã Mường Pồn,xa,15,21.5870,103.0297,,,,chưa tìm được — hỏi cán bộ xã,2,active,Mường Mươn + Mường Pồn,OSM:ten_moi,OSM tên mới — nên kiểm lại
+tua_chua,Xã Tủa Chùa,xa,16,21.9710,103.3774,,,,chưa tìm được — hỏi cán bộ xã,3,active,TT Tủa Chùa + Mường Báng + Nà Tòng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+sin_chai,Xã Sín Chải,xa,17,22.0538,103.3481,,,,chưa tìm được — hỏi cán bộ xã,3,active,Tả Sìn Thàng + Lao Xả Phình + Sín Chải,OSM:ten_moi,OSM tên mới — nên kiểm lại
+sinh_phinh,Xã Sính Phình,xa,18,21.9437,103.3271,,,,chưa tìm được — hỏi cán bộ xã,3,active,Trung Thu + Tả Phìn + Sính Phình,OSM:ten_moi,OSM tên mới — nên kiểm lại
+tua_thang,Xã Tủa Thàng,xa,19,22.0324,103.4387,,,,chưa tìm được — hỏi cán bộ xã,2,active,Huổi Só + Tủa Thàng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+sang_nhe,Xã Sáng Nhè,xa,20,21.8466,103.4587,,,,chưa tìm được — hỏi cán bộ xã,3,active,Xá Nhè + Mường Đun + Phình Sáng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+tuan_giao,Xã Tuần Giáo,xa,21,21.6457,103.3712,,,,chưa tìm được — hỏi cán bộ xã,3,active,TT Tuần Giáo + Quài Cang + Quài Nưa,OSM:ten_moi,OSM tên mới — nên kiểm lại
+quai_to,Xã Quài Tở,xa,22,21.5418,103.4569,,,,chưa tìm được — hỏi cán bộ xã,3,active,Tỏa Tình + Tênh Phông + Quài Tở,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_mun,Xã Mường Mùn,xa,23,21.7248,103.3184,,,,chưa tìm được — hỏi cán bộ xã,3,active,Mùn Chung + Pú Xi + Mường Mùn,OSM:ten_moi,OSM tên mới — nên kiểm lại
+pu_nhung,Xã Pú Nhung,xa,24,21.7226,103.4901,,,,chưa tìm được — hỏi cán bộ xã,3,active,Rạng Đông + Ta Ma + Pú Nhung,OSM:ten_moi,OSM tên mới — nên kiểm lại
+chieng_sinh,Xã Chiềng Sinh,xa,25,21.6100,103.3364,,,,chưa tìm được — hỏi cán bộ xã,4,active,Nà Sáy + Mường Thín + Mường Khong + Chiềng Sinh,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_ang,Xã Mường Ảng,xa,26,21.5268,103.2595,,,,chưa tìm được — hỏi cán bộ xã,3,active,TT Mường Ảng + Ẳng Nưa + Ẳng Cang,OSM:ten_moi,OSM tên mới — nên kiểm lại
+na_tau,Xã Nà Tấu,xa,27,21.5624,103.1443,,21.6547,103.2169,Tỉnh Điện Biên,3,active,Mường Đăng + Ngối Cáy + Nà Tấu,OSM:ten_moi,OSM tên mới — nên kiểm lại
+bung_lao,Xã Búng Lao,xa,28,21.5463,103.2891,,,,chưa tìm được — hỏi cán bộ xã,3,active,Ẳng Tở + Chiềng Đông + Búng Lao,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_lan,Xã Mường Lạn,xa,29,21.4515,103.3177,,,,chưa tìm được — hỏi cán bộ xã,3,active,Nặm Lịch + Xuân Lao + Mường Lạn,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_phang,Xã Mường Phăng,xa,30,21.4487,103.1350,,,,chưa tìm được — hỏi cán bộ xã,3,active,Nà Nhạn + Pá Khoang + Mường Phăng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+thanh_nua,Xã Thanh Nưa,xa,31,21.4215,102.9734,,21.4162,103.0082,Trường Tiểu học - Trung học cơ sở Thanh Trường,5,active,Hua Thanh + Thanh Luông + Thanh Hưng + Thanh Chăn + Thanh Nưa,OSM:ten_moi,OSM tên mới — nên kiểm lại
+thanh_an,Xã Thanh An,xa,32,21.3018,103.0465,,,,chưa tìm được — hỏi cán bộ xã,3,active,Noong Hẹt + Sam Mứn + Thanh An,OSM:ten_moi,OSM tên mới — nên kiểm lại
+thanh_yen,Xã Thanh Yên,xa,33,21.3061,102.9473,,,,chưa tìm được — hỏi cán bộ xã,3,active,Noong Luống + Pa Thơm + Thanh Yên,OSM:ten_moi,OSM tên mới — nên kiểm lại
+sam_mun,Xã Sam Mứn,xa,34,21.2072,102.9487,,21.2552,102.9916,Huyện Điện Biên,2,active,Pom Lót + Na Ư,OSM:ten_moi,OSM tên mới — nên kiểm lại
+nua_ngam,Xã Núa Ngam,xa,35,21.1793,103.0526,,,,chưa tìm được — hỏi cán bộ xã,3,active,Hẹ Muông + Na Tông + Núa Ngam,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_nha,Xã Mường Nhà,xa,36,21.1270,103.1005,,,,chưa tìm được — hỏi cán bộ xã,3,active,Mường Lói + Phu Luông + Mường Nhà,OSM:ten_moi,OSM tên mới — nên kiểm lại
+na_son,Xã Na Son,xa,37,21.2967,103.2201,,21.2340,103.2630,Huyện Điện Biên Đông,3,active,TT Điện Biên Đông + Keo Lôm + Na Son,OSM:ten_moi,OSM tên mới — nên kiểm lại
+xa_dung,Xã Xa Dung,xa,38,21.3183,103.2996,,,,chưa tìm được — hỏi cán bộ xã,2,active,Phì Nhừ + Xa Dung,OSM:ten_moi,OSM tên mới — nên kiểm lại
+pu_nhi,Xã Pu Nhi,xa,39,21.3457,103.1345,,21.4904,103.1046,Thành phố Điện Biên Phủ,2,active,Nong U + Pu Nhi,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_luan,Xã Mường Luân,xa,40,21.2469,103.3802,,,,chưa tìm được — hỏi cán bộ xã,3,active,Chiềng Sơ + Luân Giói + Mường Luân,OSM:ten_moi,OSM tên mới — nên kiểm lại
+tia_dinh,Xã Tìa Dình,xa,41,21.1415,103.3380,,,,chưa tìm được — hỏi cán bộ xã,2,active,Háng Lìa + Tìa Dình,OSM:ten_moi,OSM tên mới — nên kiểm lại
+phinh_giang,Xã Phình Giàng,xa,42,21.1252,103.2245,,,,chưa tìm được — hỏi cán bộ xã,2,active,Pú Hồng + Phình Giàng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_lay,Phường Mường Lay,phuong,43,22.0312,103.1275,,22.0225,103.1506,Trường Trung học phổ thông Mường Lay,4,active,P. Sông Đà + P. Na Lay + Lay Nưa + Sá Tổng,OSM:ten_moi,OSM tên mới — nên kiểm lại
+dien_bien_phu,Phường Điện Biên Phủ,phuong,44,21.4904,103.1046,,21.3866,103.0232,Trường Tiểu học Hà Nội - Điện Biên Phủ,6,active,P. Him Lam + P. Tân Thanh + P. Mường Thanh + P. Thanh Bình + P. Thanh Trường + Thanh Minh,OSM:ten_moi,OSM tên mới — nên kiểm lại
+muong_thanh,Phường Mường Thanh,phuong,45,21.3873,103.0169,,21.3866,103.0232,Trường Tiểu học Hà Nội - Điện Biên Phủ,3,active,P. Noong Bua + P. Nam Thanh + Thanh Xương,OSM:ten_moi,OSM tên mới — nên kiểm lại

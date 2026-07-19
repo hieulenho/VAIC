@@ -1,0 +1,1526 @@
+{
+  "name": "Aether-DB — Toàn tỉnh Điện Biên (45 ĐVHC · Offline PWA · Loa · SMS)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours"
+            }
+          ]
+        }
+      },
+      "id": "ddc9c542-f84b-425b-b27a-445371acda4a",
+      "name": "Schedule 1 giờ",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://docs.google.com/spreadsheets/d/14sIbtzFO-S_uPbkI2gxUV0E1WpNT3Z-0V296BJ-HocE/gviz/tq?tqx=out:csv&sheet=DiaBan",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "3f9e9a9f-892a-447e-b0f0-e25079a2c0b5",
+      "name": "Đọc địa bàn (DiaBan)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        768
+      ],
+      "executeOnce": true,
+      "notes": "45 ĐVHC cấp xã theo NQ 1661/NQ-UBTVQH15. Publish sheet ra CSV -> không cần OAuth."
+    },
+    {
+      "parameters": {
+        "url": "https://docs.google.com/spreadsheets/d/1cmCpWqs1iVeWXUXpO5HeRa61yDB0-Jr-KSNUaK-mYaw/gviz/tq?tqx=out:csv&sheet=DiemDo",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "b25e044a-27d4-4e0d-ac71-05f0c6063387",
+      "name": "Đọc điểm đo (DiemDo)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        448,
+        768
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "notes": "129 điểm lấy mẫu (ranh giới ĐVHC cũ). TUỲ CHỌN — trống thì tự rơi về centroid xã."
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction parseCSV(text){\n  const rows=[];let row=[],cur='',q=false;\n  for(let i=0;i<text.length;i++){const c=text[i];\n    if(q){if(c==='\"'){if(text[i+1]==='\"'){cur+='\"';i++;}else q=false;}else cur+=c;}\n    else if(c==='\"')q=true;\n    else if(c===','){row.push(cur);cur='';}\n    else if(c==='\\n'){row.push(cur);rows.push(row);row=[];cur='';}\n    else if(c!=='\\r')cur+=c;}\n  if(cur!==''||row.length){row.push(cur);rows.push(row);}\n  if(!rows.length)return[];\n  const hdr=rows.shift().map(h=>h.trim().replace(/^\\ufeff/,''));\n  return rows.filter(r=>r.some(v=>String(v).trim()!==''))\n    .map(r=>{const o={};hdr.forEach((h,i)=>o[h]=String(r[i]==null?'':r[i]).trim());return o;});\n}\nconst num = v => { const n = parseFloat(String(v==null?'':v).replace(',','.')); return isFinite(n)?n:null; };\n\n/*******************************************************************\n * DỰNG DANH SÁCH ĐIỂM ĐO TỪ SỔ ĐỊA BÀN  (thay cho hằng LOCATIONS hardcode)\n *\n * Tự thích ứng theo dữ liệu đã điền:\n *   - DiemDo có toạ độ  -> lấy mẫu 129 điểm (ranh giới ĐVHC cũ, bám lưu vực/bản làng)\n *   - DiemDo trống      -> rơi về 45 điểm của DiaBan (1 điểm/xã)\n *   - Cả hai trống      -> DỪNG với thông báo rõ, KHÔNG chạy tiếp với dữ liệu rác\n *\n * Nguồn danh mục: Nghị quyết 1661/NQ-UBTVQH15 (16/6/2025) — 45 ĐVHC (42 xã + 3 phường).\n *******************************************************************/\nconst CHUNK = 40;   // số toạ độ mỗi request Open-Meteo (multi-coordinate)\nconst FFPI_DEFAULT = 3.0;   // trung tính: xã chưa có FFPI dùng đúng ngưỡng gốc, không ưu ái\n\nconst dbCsv = String((($('Đọc địa bàn (DiaBan)').first()||{}).json||{}).data || '');\nlet ddCsv = '';\ntry { ddCsv = String((($('Đọc điểm đo (DiemDo)').first()||{}).json||{}).data || ''); } catch(e){}\n\nconst communes = parseCSV(dbCsv).filter(r => r.xa_id && (r.trang_thai||'active')==='active');\nif (!communes.length) {\n  throw new Error('Không đọc được sheet DiaBan. Kiểm tra: (1) SHEET_ID trong node \"Đọc địa bàn\", (2) Sheet đã Share \"Anyone with the link\", (3) tên sheet đúng là DiaBan.');\n}\n\nconst cmap = {};\ncommunes.forEach(c => { cmap[c.xa_id] = {\n  xa_id:c.xa_id, name:c.ten_day_du || c.xa_id, loai:c.loai||'xa',\n  ffpi_xa: num(c.ffpi),\n  sz: (num(c.sz_lat)!=null && num(c.sz_lon)!=null) ? [num(c.sz_lat), num(c.sz_lon)] : null,\n  szn: c.sz_ten || '',\n  hop_thanh_tu: c.hop_thanh_tu || ''\n}; });\n\n// --- Ưu tiên DiemDo (mịn hơn cấp xã) ---\nlet points = [];\nlet mode = 'diem_do';\nif (ddCsv) {\n  points = parseCSV(ddCsv)\n    .filter(r => r.xa_id && cmap[r.xa_id] && (r.trang_thai||'active')==='active')\n    .filter(r => num(r.lat)!=null && num(r.lon)!=null)\n    .map(r => ({ point_id:r.diem_id || (r.xa_id+'__'+r.ten_diem), point_name:r.ten_diem || r.diem_id,\n                 xa_id:r.xa_id, lat:num(r.lat), lon:num(r.lon),\n                 ffpi: num(r.ffpi) != null ? num(r.ffpi) : (cmap[r.xa_id].ffpi_xa != null ? cmap[r.xa_id].ffpi_xa : FFPI_DEFAULT) }));\n}\n// --- Rơi về DiaBan (1 điểm/xã) ---\nif (!points.length) {\n  mode = 'trung_tam_xa';\n  points = communes\n    .filter(r => num(r.lat)!=null && num(r.lon)!=null)\n    .map(r => ({ point_id:r.xa_id, point_name:r.ten_day_du, xa_id:r.xa_id,\n                 lat:num(r.lat), lon:num(r.lon),\n                 ffpi: num(r.ffpi) != null ? num(r.ffpi) : FFPI_DEFAULT }));\n}\nif (!points.length) {\n  throw new Error('Sổ địa bàn CHƯA CÓ TOẠ ĐỘ. Điền cột lat/lon ở sheet DiemDo (129 điểm) hoặc DiaBan (45 xã) rồi chạy lại. Xem sheet HuongDan để biết 3 cách lấy toạ độ.');\n}\n\n// --- Cảnh báo dữ liệu chưa hoàn thiện: KHÔNG để hệ thống im lặng chạy sai ---\nconst warnings = [];\nconst noFfpi = points.filter(p => p.ffpi === FFPI_DEFAULT).length;\nif (noFfpi) warnings.push(noFfpi + '/' + points.length + ' điểm chưa có FFPI -> đang dùng ngưỡng mưa mặc định, MẤT tính cá thể hoá theo xã (yêu cầu \"sub-regional\"). Tính FFPI hàng loạt trên Google Earth Engine rồi dán vào sheet.');\nconst noSz = Object.values(cmap).filter(c => !c.sz).length;\nif (noSz) warnings.push(noSz + '/' + communes.length + ' xã chưa có điểm an toàn (sz_lat/sz_lon) -> bản đồ thoát nạn sẽ trống. Đây là thông tin PHẢI lấy từ cán bộ xã, không được suy đoán.');\nif (mode === 'trung_tam_xa') warnings.push('Đang lấy mẫu 1 điểm/xã. Sau sắp xếp 2025 một xã gộp tới 5-6 đơn vị cũ nên 1 điểm là THÔ so với yêu cầu \"sub-regional\". Điền toạ độ sheet DiemDo để lấy mẫu mịn hơn.');\n\n// --- Chia lô toạ độ cho Open-Meteo multi-coordinate ---\nconst chunks = [];\nfor (let i=0; i<points.length; i+=CHUNK) chunks.push(points.slice(i, i+CHUNK));\n\nconst registry = { mode, n_points:points.length, n_communes:Object.keys(cmap).length,\n                   points, communes:cmap, warnings, chunk_size:CHUNK, n_chunks:chunks.length };\ntry { $getWorkflowStaticData('global').registry = registry; } catch(e){}\n\nreturn chunks.map((ch, i) => ({ json: {\n  chunk_index: i, n_chunks: chunks.length,\n  lat: ch.map(p=>p.lat).join(','), lon: ch.map(p=>p.lon).join(','),\n  point_ids: ch.map(p=>p.point_id),\n  __registry_mode: mode, __n_points: points.length\n}}));"
+      },
+      "id": "af557047-306b-430b-a495-d20abf4439ef",
+      "name": "Dựng điểm đo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        768
+      ],
+      "notes": "Thay hằng LOCATIONS hardcode. Chia lô toạ độ cho Open-Meteo. CỐ Ý throw nếu sheet chưa có toạ độ."
+    },
+    {
+      "parameters": {
+        "url": "=https://api.open-meteo.com/v1/forecast?latitude={{ $json.lat }}&longitude={{ $json.lon }}&hourly=precipitation,soil_moisture_0_to_1cm,visibility,weather_code&daily=temperature_2m_min,temperature_2m_max,precipitation_sum,weather_code&past_days=1&forecast_days=7&timezone=Asia%2FBangkok",
+        "options": {}
+      },
+      "id": "622305dc-ab0e-4c6f-8772-cc3f9a485ed8",
+      "name": "Open-Meteo Forecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        768
+      ],
+      "notes": "Chia lô nhiều toạ độ/request. past_days=1 (bias tính ở luồng riêng) -> response nhẹ hơn ~10 lần so với past_days=12."
+    },
+    {
+      "parameters": {
+        "url": "=https://flood-api.open-meteo.com/v1/flood?latitude={{ $json.lat }}&longitude={{ $json.lon }}&daily=river_discharge&past_days=7&forecast_days=7",
+        "options": {}
+      },
+      "id": "6cddd8b9-cf74-4bed-adc0-ad26c0d17869",
+      "name": "Open-Meteo Flood",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1104,
+        768
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "function stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction parseCSV(text){\n  const rows=[];let row=[],cur='',q=false;\n  for(let i=0;i<text.length;i++){const c=text[i];\n    if(q){if(c==='\"'){if(text[i+1]==='\"'){cur+='\"';i++;}else q=false;}else cur+=c;}\n    else if(c==='\"')q=true;\n    else if(c===','){row.push(cur);cur='';}\n    else if(c==='\\n'){row.push(cur);rows.push(row);row=[];cur='';}\n    else if(c!=='\\r')cur+=c;}\n  if(cur!==''||row.length){row.push(cur);rows.push(row);}\n  if(!rows.length)return[];\n  const hdr=rows.shift().map(h=>h.trim().replace(/^\\ufeff/,''));\n  return rows.filter(r=>r.some(v=>String(v).trim()!==''))\n    .map(r=>{const o={};hdr.forEach((h,i)=>o[h]=String(r[i]==null?'':r[i]).trim());return o;});\n}\nconst num = v => { const n = parseFloat(String(v==null?'':v).replace(',','.')); return isFinite(n)?n:null; };\n\n/*******************************************************************\n * AETHER-DB — CONSENSUS ENGINE v3  (tất định, KHÔNG dùng LLM)\n *\n * KHÁC v2: lấy mẫu tại N ĐIỂM rồi QUY VỀ XÃ theo mức rủi ro CAO NHẤT.\n *   Lý do: NQ 1661/NQ-UBTVQH15 gộp 129 ĐVHC thành 45 (có xã gộp 5-6 đơn vị).\n *   Ở địa hình núi, một xã gộp trải trên nhiều tiểu vùng khí hậu -> 1 điểm/xã là quá thô,\n *   đúng thứ đề bài phê phán. Đánh giá rủi ro MỊN HƠN cấp xã, phát tin ĐÚNG cấp xã.\n *\n * NGUỒN & ĐỘ TRỄ:\n *   Open-Meteo (ECMWF) : dự báo, real-time           -> nguồn chính\n *   GloFAS Flood       : mô hình thuỷ văn, real-time -> tín hiệu lũ sông\n *   ERA5 (bias cache)  : tái phân tích, trễ 5-7 ngày -> hiệu chỉnh CÓ ĐỘ TRỄ (flow riêng, 1 lần/ngày)\n *   OpenWeatherMap     : chỉ gọi cho xã ĐÃ cảnh báo  -> xác minh đồng thuận (tiết kiệm quota)\n *******************************************************************/\nconst TZ_OFFSET_MS = 7*3600*1000;\nconst TH = {\n  RAIN_CRIT_BASE:50, RAIN_WARN_BASE:30, RAIN_ADV_BASE:15,\n  SOIL_CRIT:85, FROST_WARN:4, FROST_CRIT:0,\n  FOG_CRIT:50, FOG_WARN:200, FOG_ADV:500,\n  Q_WARN:1.8, Q_CRIT:2.5, DRIFT_MM:20\n};\nconst FFPI_REF = 3.0;\nconst RANK = { SAFE:0, ADVISORY:1, WARNING:2, CRITICAL:3 };\nconst sum = (a,i,j) => a.slice(Math.max(i,0), j).reduce((s,v)=>s+(v||0),0);\nconst thr = (base, ffpi) => +(base * (FFPI_REF / (ffpi || FFPI_REF))).toFixed(1);\nconst nowLocal = new Date(Date.now()+TZ_OFFSET_MS);\nconst todayStr = nowLocal.toISOString().slice(0,10);\nconst nowHourKey = nowLocal.toISOString().slice(0,13);\n\nconst sd = (()=>{ try { return $getWorkflowStaticData('global'); } catch(e){ return {}; } })();\nconst firstIn = $input.first().json;\nconst simulated = firstIn.__simulated === true;\n\nlet registry, perPoint = [];\n\nif (simulated) {\n  registry = firstIn.registry; perPoint = firstIn.points;\n} else {\n  registry = sd.registry;\n  if (!registry) throw new Error('Chưa có registry. Node \"Dựng điểm đo\" phải chạy trước Consensus.');\n\n  const fc = $('Open-Meteo Forecast').all().map(i=>i.json);\n  let fl=[]; try { fl = $('Open-Meteo Flood').all().map(i=>i.json); } catch(e){}\n  const bias = sd.biasByCommune || {};\n\n  // Open-Meteo trả 1 object/toạ độ theo ĐÚNG thứ tự yêu cầu; các lô nối tiếp nhau.\n  if (fc.length !== registry.points.length) {\n    throw new Error('Lệch số lượng: yêu cầu ' + registry.points.length + ' điểm, nhận về ' + fc.length\n      + '. Không map được điểm với dữ liệu -> DỪNG thay vì cảnh báo nhầm xã.');\n  }\n\n  perPoint = registry.points.map((P,i) => {\n    const f=fc[i]||{}, h=f.hourly||{}, d=f.daily||{};\n    const times=h.time||[], rain=h.precipitation||[], vis=h.visibility||[], wcH=h.weather_code||[];\n    let nowIdx = times.findIndex(t => t && String(t).slice(0,13)===nowHourKey);\n    if (nowIdx < 0) nowIdx = 3*24;\n    let todayIdx = (d.time||[]).indexOf(todayStr);\n    if (todayIdx < 0) todayIdx = 3;\n\n    const forecast_next24 = +sum(rain, nowIdx, nowIdx+24).toFixed(1);\n    const soilArr = h.soil_moisture_0_to_1cm||[];\n    const soilNow = soilArr[nowIdx]!=null ? +(soilArr[nowIdx]*100).toFixed(0) : null;\n    const tmins = (d.temperature_2m_min||[]).slice(todayIdx, todayIdx+2).filter(v=>v!=null);\n    const t_min_next24 = tmins.length ? Math.min(...tmins) : null;\n\n    const visWin = vis.slice(nowIdx, nowIdx+12).filter(v=>v!=null);\n    let vis_min = visWin.length ? Math.min(...visWin) : null;\n    if (vis_min==null && wcH.slice(nowIdx,nowIdx+12).some(c=>c===45||c===48)) vis_min = 150;\n\n    let qRatio=null;\n    const q = (((fl[i]||{}).daily)||{}).river_discharge||[];\n    if (q.length>=8) {\n      const past=q.slice(0,7).filter(v=>v!=null).sort((a,b)=>a-b);\n      const med=past.length?past[Math.floor(past.length/2)]:null;\n      const fut=q.slice(7).filter(v=>v!=null);\n      if (med>0 && fut.length) qRatio=+(Math.max(...fut)/med).toFixed(2);\n    }\n\n    return { ...P, forecast_next24, soilNow, t_min_next24, vis_min, qRatio,\n             bias_mm: bias[P.xa_id]!=null ? bias[P.xa_id].bias_mm : null,\n             bias_per_day: bias[P.xa_id]!=null ? bias[P.xa_id].per_day : 0,\n             daily:{ time:(d.time||[]).slice(todayIdx,todayIdx+7),\n                     t_min:(d.temperature_2m_min||[]).slice(todayIdx,todayIdx+7),\n                     t_max:(d.temperature_2m_max||[]).slice(todayIdx,todayIdx+7),\n                     precip_sum:(d.precipitation_sum||[]).slice(todayIdx,todayIdx+7),\n                     weather_code:(d.weather_code||[]).slice(todayIdx,todayIdx+7) } };\n  });\n}\n\n// ---- Ngưỡng cứng TỪNG ĐIỂM ----\nconst scored = perPoint.map(p => {\n  const rainCrit=thr(TH.RAIN_CRIT_BASE,p.ffpi), rainWarn=thr(TH.RAIN_WARN_BASE,p.ffpi), rainAdv=thr(TH.RAIN_ADV_BASE,p.ffpi);\n  const biasCorr = Math.max(0, p.bias_per_day||0);       // chỉ cộng khi mô hình THIẾU mưa\n  const effRain = (p.forecast_next24||0) + biasCorr;\n  let level='SAFE', risk='none';\n  if ((effRain>rainCrit && (p.soilNow||0)>TH.SOIL_CRIT) || (p.qRatio||0)>TH.Q_CRIT) {\n    level='CRITICAL'; risk=(p.qRatio||0)>TH.Q_CRIT ? 'flood' : 'landslide';\n  } else if (p.t_min_next24!=null && p.t_min_next24<TH.FROST_CRIT) { level='CRITICAL'; risk='frost'; }\n  else if (p.vis_min!=null && p.vis_min<TH.FOG_CRIT) { level='CRITICAL'; risk='fog'; }\n  else if (effRain>rainWarn || ((p.soilNow||0)>TH.SOIL_CRIT && effRain>rainAdv) || (p.qRatio||0)>TH.Q_WARN) { level='WARNING'; risk='flood'; }\n  else if (p.t_min_next24!=null && p.t_min_next24<TH.FROST_WARN) { level='WARNING'; risk='frost'; }\n  else if (p.vis_min!=null && p.vis_min<TH.FOG_WARN) { level='WARNING'; risk='fog'; }\n  else if (p.vis_min!=null && p.vis_min<TH.FOG_ADV) { level='ADVISORY'; risk='fog'; }\n  else if (effRain>rainAdv) { level='ADVISORY'; risk='rain'; }\n  else if (p.t_min_next24!=null && p.t_min_next24<7) { level='ADVISORY'; risk='cold'; }\n  return {...p, alert_level:level, risk_type:risk, eff_rain:+effRain.toFixed(1),\n          near_threshold: effRain > rainWarn*0.8, rain_threshold_mm:rainCrit};\n});\n\n// ---- QUY VỀ XÃ: lấy điểm rủi ro CAO NHẤT làm đại diện ----\nconst byXa = {};\nscored.forEach(p => { (byXa[p.xa_id] = byXa[p.xa_id] || []).push(p); });\n\nconst locations = [], alerts = [], diagnostics = {\n  registry_mode: registry.mode, n_points: scored.length, n_communes: Object.keys(byXa).length,\n  thresholds_by_location:{}, ffpi_by_location:{}, bias_by_location_mm:{}, model_drift_flag:{},\n  worst_point_by_location:{}, points_by_location:{}, spread_mm_by_location:{},\n  warnings: (registry.warnings||[]).slice()\n};\n\nObject.keys(byXa).forEach(xid => {\n  const pts = byXa[xid].slice().sort((a,b)=>\n    (RANK[b.alert_level]-RANK[a.alert_level]) || (b.eff_rain-a.eff_rain));\n  const w = pts[0];                       // điểm xấu nhất = đại diện cho xã\n  const C = registry.communes[xid] || {};\n  const rains = pts.map(p=>p.eff_rain).filter(v=>v!=null);\n  const spread = rains.length>1 ? +(Math.max(...rains)-Math.min(...rains)).toFixed(1) : 0;\n\n  locations.push({ id:xid, name:C.name||xid, lat:w.lat, lon:w.lon, ffpi:w.ffpi,\n    alert_level:w.alert_level, risk_type:w.risk_type,\n    metrics:{ forecast_next24_mm:w.forecast_next24, eff_rain_mm:w.eff_rain,\n      soil_moisture_pct:w.soilNow, t_min_next24_c:w.t_min_next24,\n      visibility_min_m:w.vis_min, discharge_ratio:w.qRatio,\n      worst_point:w.point_name, n_points:pts.length, spread_mm:spread },\n    daily:w.daily||null });\n\n  diagnostics.thresholds_by_location[xid]={rain_critical_mm:thr(TH.RAIN_CRIT_BASE,w.ffpi),\n    rain_warning_mm:thr(TH.RAIN_WARN_BASE,w.ffpi), rain_advisory_mm:thr(TH.RAIN_ADV_BASE,w.ffpi)};\n  diagnostics.ffpi_by_location[xid]=w.ffpi;\n  diagnostics.bias_by_location_mm[xid]=w.bias_mm;\n  diagnostics.model_drift_flag[xid]= w.bias_mm!=null && Math.abs(w.bias_mm)>TH.DRIFT_MM;\n  diagnostics.worst_point_by_location[xid]=w.point_name;\n  diagnostics.points_by_location[xid]=pts.length;\n  diagnostics.spread_mm_by_location[xid]=spread;\n\n  if (['WARNING','CRITICAL'].includes(w.alert_level)) {\n    alerts.push({ id:xid, name:C.name||xid, sz:C.sz, szn:C.szn, ffpi:w.ffpi,\n      alert_level:w.alert_level, risk_type:w.risk_type,\n      metrics:{ forecast_next24_mm:w.forecast_next24, eff_rain_mm:w.eff_rain,\n        soil_moisture_pct:w.soilNow, t_min_next24_c:w.t_min_next24, visibility_min_m:w.vis_min,\n        discharge_ratio:w.qRatio, bias_mm:w.bias_mm, rain_threshold_mm:w.rain_threshold_mm,\n        worst_point:w.point_name, n_points_in_commune:pts.length, spread_mm:spread },\n      lat:w.lat, lon:w.lon });\n  }\n});\n\n// ---- Cảnh báo vận hành: không tầng nào được chết âm thầm ----\nif (!simulated) {\n  if (!Object.keys(sd.biasByCommune||{}).length)\n    diagnostics.warnings.push('Chưa có bias ERA5 -> tầng hiệu chuẩn TẮT. Luồng \"Bias ERA5 hằng ngày\" phải chạy ít nhất 1 lần (Schedule 02:00, hoặc Execute thủ công).');\n  const noSz = alerts.filter(a=>!a.sz).length;\n  if (noSz) diagnostics.warnings.push(noSz + ' xã đang cảnh báo NHƯNG chưa có điểm an toàn trong sổ địa bàn -> tin nhắn sẽ không có nơi để chỉ dân chạy tới.');\n}\n\nconst payload = { schema_version:'3.0', generated_at:new Date().toISOString(), simulated,\n  confidence: simulated ? 'SIMULATED' : (Object.keys(sd.biasByCommune||{}).length ? 'HIGH' : 'MEDIUM'),\n  source_agreement: null,           // do node \"Xác minh OpenWeatherMap\" điền sau\n  locations, diagnostics };\ntry { sd.latestForecast = payload; } catch(e){}\n\nreturn [{ json: { ...payload, alerts } }];"
+      },
+      "id": "7d9f1af9-d030-407e-bb38-e8f77734a320",
+      "name": "Consensus Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        768
+      ],
+      "notes": "TRÁI TIM: rủi ro từng điểm -> gộp về xã lấy MAX. Ngưỡng cá thể hoá theo FFPI. 4 rủi ro: flood/landslide/frost/FOG."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Chỉ gọi OpenWeatherMap cho các xã ĐÃ vượt ngưỡng -> ngày thường tốn 0 call.\n// Free tier OWM chỉ 1.000 call/ngày; gọi đại trà 45 xã × 24 vòng = 1.080 -> vỡ quota.\nconst d = $input.first().json;\nif (!d.alerts || !d.alerts.length) return [];\nreturn d.alerts.map(a => ({ json:{ xa_id:a.id, lat:a.lat, lon:a.lon } }));"
+      },
+      "id": "36934557-3ebf-4ad6-a56c-521f2d020237",
+      "name": "Xã cần xác minh",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        768
+      ],
+      "alwaysOutputData": true,
+      "notes": "Chỉ xã ĐÃ vượt ngưỡng mới gọi OWM -> ngày thường tốn 0 call, giữ trong free tier 1.000/ngày."
+    },
+    {
+      "parameters": {
+        "url": "=https://api.openweathermap.org/data/2.5/forecast?lat={{ $json.lat }}&lon={{ $json.lon }}&appid=c24c3d671ee1c125a99c6fbe56fedec5&units=metric",
+        "options": {}
+      },
+      "id": "59920d22-b867-4d98-aee8-2e6120abc93e",
+      "name": "OpenWeatherMap",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        768
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Nguồn đề bài chỉ định. Key mới cần tới ~2 giờ mới kích hoạt -> 401 lúc đầu là bình thường."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Đối chiếu OpenWeatherMap với Open-Meteo -> đồng thuận hay không.\n// NGUYÊN TẮC AN TOÀN TRƯỚC: hai nguồn mâu thuẫn thì VẪN cảnh báo, chỉ hạ confidence\n// và gắn cờ để cán bộ xã xác minh. Không bao giờ vì mâu thuẫn mà im lặng.\nconst DISAGREE_MM = 25;\nconst base = $('Consensus Engine').first().json;\nconst pts = $('Xã cần xác minh').all().map(i=>i.json);\nconst ow  = $input.all().map(i=>i.json);\n\nconst alerts = (base.alerts||[]).map(a => ({...a, metrics:{...a.metrics}}));\nconst cut = Date.now()/1000 + 86400;\nlet checked=0, disagree=0;\n\npts.forEach((P,i) => {\n  const list = (ow[i]||{}).list || [];\n  if (!list.length) return;\n  const owm = +list.filter(x=>x.dt<=cut).reduce((s,x)=>s+(((x.rain||{})['3h'])||0),0).toFixed(1);\n  const a = alerts.find(x=>x.id===P.xa_id); if (!a) return;\n  const gap = +Math.abs((a.metrics.forecast_next24_mm||0) - owm).toFixed(1);\n  a.metrics.owm_next24_mm = owm;\n  a.metrics.source_disagreement_mm = gap;\n  a.metrics.eff_rain_mm = Math.max(a.metrics.eff_rain_mm||0, owm);   // MAX -> không bỏ sót\n  a.metrics.needs_field_check = gap > DISAGREE_MM;\n  checked++; if (gap > DISAGREE_MM) disagree++;\n});\n\nconst agreement = checked>0 && disagree===0;\nconst payload = {...base, alerts, source_agreement:agreement,\n  confidence: (agreement && base.confidence==='HIGH') ? 'HIGH' : 'MEDIUM'};\npayload.diagnostics = {...base.diagnostics};\npayload.diagnostics.owm_checked = checked;\npayload.diagnostics.owm_disagree = disagree;\nif (!checked) payload.diagnostics.warnings = (payload.diagnostics.warnings||[])\n  .concat('Không xác minh được bằng OpenWeatherMap (thiếu key hoặc key chưa kích hoạt — key mới cần tới ~2 giờ). Cảnh báo VẪN phát, confidence hạ xuống MEDIUM.');\ntry { $getWorkflowStaticData('global').latestForecast = { ...payload, alerts: undefined }; } catch(e){}\nreturn [{ json: payload }];"
+      },
+      "id": "8dcaa109-e080-4cbc-bdd3-d46c6eb8f3d3",
+      "name": "Xác minh OpenWeatherMap",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1984,
+        768
+      ],
+      "notes": "OWM CHỈ ĐƯỢC NÂNG mức cảnh báo, không được hạ. Nguồn thứ hai nói 'ít mưa hơn' không đủ căn cứ gỡ cảnh báo."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.alerts.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "faa1ee41-a05f-4841-a1bb-7e8376b193a0",
+      "name": "Có cảnh báo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2208,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mini knowledge-base lịch sử thiên tai Điện Biên — bản MVP thay Qdrant.\n// Khi có dữ liệu thật từ Ban Chỉ huy PCTT & TKCN: thay HISTORY bằng Qdrant retriever.\nconst HISTORY = [\n  { loc:'muong_nhe', type:'flood', year:2024, note:'Lũ quét sau mưa 62mm/24h, ngập cầu tràn trung tâm xã, chia cắt 2 bản trong 8 giờ' },\n  { loc:'tua_thang', type:'landslide', year:2023, note:'Sạt lở taluy dương sau mưa tích lũy 110mm/3 ngày, đất bão hòa, vùi lấp 200m đường liên xã' },\n  { loc:'sin_thau', type:'frost', year:2022, note:'Sương giá -1°C kéo dài 3 đêm, chết rét hơn 40 gia súc, thiệt hại rau màu vụ đông' },\n  { loc:'*', type:'flood', year:2023, note:'Đợt lũ diện rộng toàn tỉnh: cảnh báo cấp tỉnh đến xã trễ khoảng 6 giờ so với diễn biến thực tế' },\n  { loc:'*', type:'landslide', year:2024, note:'Nhiều điểm sạt lở khi độ ẩm đất vượt 85% dù mưa ngày chỉ 40-45mm — độ bão hòa đất quan trọng hơn mưa tức thời' },\n  { loc:'*', type:'frost', year:2021, note:'Rét hại diện rộng dưới 3°C, các bản vùng cao trên 1200m chịu ảnh hưởng nặng nhất' },\n  { loc:'*', type:'fog', year:2023, note:'Sương mù dày đặc tầm nhìn dưới 30m trên đèo, nhiều vụ tai nạn xe máy đường liên xã vào sáng sớm mùa đông' }\n];\nconst MODEL = 'DeepSeek-V4-Flash';  // <-- THAY: model ID copy nguyên văn từ marketplace.fptcloud.com\n\nconst data = $input.first().json;\nconst out = [];\nfor (const a of data.alerts) {\n  const hist = HISTORY\n    .filter(h => h.loc===a.id || h.loc==='*')\n    .filter(h => h.type===a.risk_type\n      || (a.risk_type==='flood' && h.type==='landslide')\n      || (a.risk_type==='landslide' && h.type==='flood'))\n    .slice(0,3);\n\n  const system = [\n    '# ROLE',\n    'Bạn là chuyên gia Khí tượng Thủy văn và Phân tích Rủi ro Thiên tai cấp cao, phụ trách khu vực miền núi Điện Biên, Việt Nam.',\n    '# NGUYÊN TẮC QUAN TRỌNG NHẤT (Deterministic Safety Core)',\n    'Mức cảnh báo ' + a.alert_level + ' ĐÃ ĐƯỢC tầng ngưỡng tất định của hệ thống quyết định. Bạn TUYỆT ĐỐI KHÔNG thay đổi mức này. Vai trò của bạn là phân tích ngữ cảnh, không phải quyết định.',\n    '# TASK',\n    '1. Đối chiếu số liệu hiện tại (nguồn dự báo chính, nguồn đối chứng, ngưỡng riêng của xã) với lịch sử thiên tai được cung cấp.',\n    '2. Viết lập luận 3-4 câu tiếng Việt, trích dẫn số liệu cụ thể và sự kiện lịch sử tương đồng.',\n    '3. Ngưỡng mưa của xã này được cá thể hóa theo chỉ số FFPI (Flash Flood Potential Index) = ' + a.ffpi + '. Nêu rõ điều đó nếu liên quan.',\n    '# OUTPUT',\n    'Trả về DUY NHẤT một khối JSON, không markdown, không văn bản thừa:',\n    '{\"location\":\"...\",\"alert_level\":\"' + a.alert_level + '\",\"risk_type\":\"' + a.risk_type + '\",\"reasoning\":\"...\",\"confidence\":\"HIGH|MEDIUM\"}'\n  ].join('\\n');\n\n  const user = JSON.stringify({\n    dia_diem:a.name, so_lieu_hien_tai:a.metrics, chi_so_ffpi_cua_xa:a.ffpi,\n    lich_su_thien_tai_lien_quan:hist, do_tin_cay_toan_he_thong:data.confidence\n  });\n\n  out.push({ json: { alert:a, request_body:{\n    model:MODEL, messages:[{role:'system',content:system},{role:'user',content:user}],\n    temperature:0.2, max_tokens:600\n  } } });\n}\nreturn out;"
+      },
+      "id": "4f5eb3ed-bce3-4d79-9e6e-53a1a866a403",
+      "name": "Split Alerts + RAG mini",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2432,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mkp-api.fptcloud.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-gy9l_NWmwjIQBvu-ySPEFfzSbmVxkJYgLVRFp3t1UKw="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {}
+      },
+      "id": "5098ec40-9ab0-451d-aceb-49e520f509f7",
+      "name": "AI Agent 1 — Risk Analyst",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        640
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse output Agent 1 + soạn request Agent 2 (sinh 3 BẢN TIN: dân / cán bộ bản / kịch bản loa)\nconst ctx = $('Split Alerts + RAG mini').item.json;\nconst a = ctx.alert;\nlet content = (($json.choices||[])[0]||{}).message ? $json.choices[0].message.content : '';\ncontent = String(content||'').replace(/```json/g,'').replace(/```/g,'').trim();\nlet analysis;\ntry { analysis = JSON.parse(content); }\ncatch(e){ analysis = { reasoning: content || 'Không nhận được phân tích AI — cảnh báo phát theo ngưỡng tất định.', confidence:'MEDIUM' }; }\n\nconst system = [\n  '# ROLE',\n  'Bạn là kỹ sư hệ thống cảnh báo sớm kiêm chuyên gia truyền thông rủi ro cho đồng bào dân tộc thiểu số tại Điện Biên.',\n  '# TASK',\n  'Sinh BA bản tin khác nhau cho cùng một sự kiện, phục vụ ba đối tượng khác nhau:',\n  '1. NGƯỜI DÂN (t/d/a): cực ngắn, ngôn ngữ đời thường, hướng hành động.',\n  '2. CÁN BỘ BẢN (official): danh sách việc phải làm ngay, cụ thể, kiểm đếm được.',\n  '3. KỊCH BẢN LOA (loa): văn bản để đọc/phát trên loa truyền thanh của bản.',\n  '# RULES',\n  '1. Tuyệt đối không dùng thuật ngữ kỹ thuật (mm, %, hPa, lưu lượng, FFPI) trong t/d/a và loa.',\n  '2. \"t\": tối đa 6 từ, VIẾT HOA. \"d\": tối đa 15 từ. \"a\": tối đa 12 từ, mệnh lệnh trực tiếp, VIẾT HOA.',\n  '3. \"official\": mảng 3-4 chuỗi. Mỗi chuỗi là MỘT việc làm được ngay, có đối tượng cụ thể',\n  '   (VD: \"Đến ngay các hộ ven suối: nhà ông Vàng A Chúng, bản Tủa Thàng\", \"Chốt chặn ngầm tràn đầu bản, không cho xe qua\").',\n  '   Phải bao gồm: (a) đi kiểm tra hộ nguy cơ cao, (b) chốt chặn/cấm đường điểm xung yếu, (c) phát loa, (d) báo cáo lên xã.',\n  '4. \"loa\": 2-3 câu, viết như lời nói, nhịp chậm, lặp tên bản và hành động. Đây là văn bản SẼ ĐƯỢC ĐỌC THÀNH TIẾNG.',\n  '5. Trả về DUY NHẤT JSON, không markdown, không giải thích:',\n  '{\"t\":\"...\",\"d\":\"...\",\"a\":\"...\",\"official\":[\"...\",\"...\",\"...\"],\"loa\":\"...\"}'\n].join('\\n');\n\nconst user = JSON.stringify({\n  loai_rui_ro:a.risk_type, muc_canh_bao:a.alert_level, dia_diem:a.name,\n  diem_an_toan:a.szn, phan_tich_chuyen_gia:analysis.reasoning\n});\n\nreturn { json: { alert:a, analysis, request_body:{\n  model:ctx.request_body.model, messages:[{role:'system',content:system},{role:'user',content:user}],\n  temperature:0.4, max_tokens:700\n} } };"
+      },
+      "id": "ae16b181-b590-485b-b7de-7ca30bb931bc",
+      "name": "Parse Agent 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2864,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mkp-api.fptcloud.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-gy9l_NWmwjIQBvu-ySPEFfzSbmVxkJYgLVRFp3t1UKw="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {}
+      },
+      "id": "620d416f-d1d3-44f2-aa00-53b61d885179",
+      "name": "AI Agent 2 — Bulletin Generator",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3088,
+        640
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Sinh 3 bản tin: dân (t/d/a) · CÁN BỘ BẢN (checklist) · KỊCH BẢN LOA. Có fallback cứng nếu LLM lỗi."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nfunction stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction parseCSV(text){\n  const rows=[];let row=[],cur='',q=false;\n  for(let i=0;i<text.length;i++){const c=text[i];\n    if(q){if(c==='\"'){if(text[i+1]==='\"'){cur+='\"';i++;}else q=false;}else cur+=c;}\n    else if(c==='\"')q=true;\n    else if(c===','){row.push(cur);cur='';}\n    else if(c==='\\n'){row.push(cur);rows.push(row);row=[];cur='';}\n    else if(c!=='\\r')cur+=c;}\n  if(cur!==''||row.length){row.push(cur);rows.push(row);}\n  if(!rows.length)return[];\n  const hdr=rows.shift().map(h=>h.trim().replace(/^\\ufeff/,''));\n  return rows.filter(r=>r.some(v=>String(v).trim()!==''))\n    .map(r=>{const o={};hdr.forEach((h,i)=>o[h]=String(r[i]==null?'':r[i]).trim());return o;});\n}\n\nconst CONFIG = {\n  BASE_URL: 'https://n8n.phaco.com.vn',   // <-- THAY: host n8n của bạn (không có / ở cuối)\n  SMS_MAX_SEGMENTS: 1                          // 1 đoạn = 153 ký tự GSM-7 khi ghép\n};\n\n// Lắp Schema A.2 (siêu nhẹ, cho link offline) + text SMS (1 đoạn) + text chat (đầy đủ) + trạng thái loa\nconst ctx = $('Parse Agent 1').item.json;\nconst a = ctx.alert;\nlet content = (($json.choices||[])[0]||{}).message ? $json.choices[0].message.content : '';\ncontent = String(content||'').replace(/```json/g,'').replace(/```/g,'').trim();\nlet ui; try { ui = JSON.parse(content); } catch(e){ ui = {}; }\n\n// Fallback cứng: LLM lỗi thì cảnh báo VẪN PHẢI phát được (Deterministic Safety Core)\nconst FB = {\n  flood:{t:'LŨ QUÉT KHẨN CẤP',d:'Nước lũ đang lên rất nhanh ở suối gần bản',a:'CHẠY NGAY LÊN ĐỒI CAO. KHÔNG LỘI QUA SUỐI.',\n    official:['Đến ngay các hộ ở ven suối, hạ lưu, yêu cầu di dời lên cao','Chốt chặn ngầm tràn và cầu tạm, không cho người và xe qua','Phát loa liên tục cho đến khi mọi hộ đã lên điểm cao','Báo cáo số hộ đã di dời về UBND xã'],\n    loa:'Bà con chú ý. Nước lũ đang lên rất nhanh ở suối gần bản. Bà con hãy chạy ngay lên đồi cao. Tuyệt đối không lội qua suối. Bà con chú ý, chạy ngay lên đồi cao.'},\n  landslide:{t:'NGUY CƠ SẠT LỞ ĐẤT',d:'Đất no nước, sườn đồi dốc có thể sập xuống',a:'RỜI XA CHÂN ĐỒI VÀ TALUY NGAY.',\n    official:['Đến các hộ ở chân đồi và taluy dương, yêu cầu rời khỏi nhà','Cấm đi lại đoạn đường có vết nứt hoặc sạt trước đây','Phát loa cảnh báo, nhắc không trú dưới chân đồi','Báo cáo các điểm nứt đất mới về UBND xã'],\n    loa:'Bà con chú ý. Đất đã no nước, sườn đồi có thể sạt lở bất cứ lúc nào. Bà con ở chân đồi hãy rời khỏi nhà ngay. Không đi lại dưới chân taluy.'},\n  frost:{t:'SƯƠNG GIÁ RÉT HẠI',d:'Đêm nay trời rét đậm, có sương giá',a:'ĐƯA TRÂU BÒ VỀ CHUỒNG KÍN. GIỮ ẤM NGƯỜI GIÀ TRẺ NHỎ.',\n    official:['Nhắc từng hộ đưa trâu bò về chuồng, che chắn kín','Kiểm tra các hộ có người già và trẻ nhỏ, đủ chăn ấm chưa','Phát loa nhắc không thả rông gia súc qua đêm','Báo cáo số gia súc đã đưa về chuồng về UBND xã'],\n    loa:'Bà con chú ý. Đêm nay trời rét đậm, có sương giá. Bà con hãy đưa trâu bò về chuồng, che chắn cho kín. Nhớ giữ ấm cho người già và trẻ nhỏ.'},\n  fog:{t:'SƯƠNG MÙ DÀY ĐẶC',d:'Sáng nay sương mù dày, đường đèo không nhìn thấy xe',a:'HOÃN ĐI XE MÁY ĐƯỜNG ĐÈO. NẾU ĐI: BẬT ĐÈN, ĐI CHẬM.',\n    official:['Nhắc các hộ có con đi học bằng xe máy hoãn giờ đi','Cắm biển cảnh báo ở đoạn đèo, khúc cua khuất','Phát loa nhắc bật đèn và đi chậm','Báo cáo tình hình giao thông về UBND xã'],\n    loa:'Bà con chú ý. Sáng nay sương mù rất dày, đường đèo không nhìn thấy xe đi ngược chiều. Bà con hãy hoãn đi xe máy. Nếu bắt buộc phải đi thì bật đèn và đi thật chậm.'}\n};\nconst fb = FB[a.risk_type] || FB.flood;\nconst t = ui.t || fb.t, d = ui.d || fb.d, act = ui.a || fb.a;\nconst official = (Array.isArray(ui.official) && ui.official.length) ? ui.official : fb.official;\nconst loa = ui.loa || fb.loa;\n\n// ---- Schema A.2: chỉ chở DỮ LIỆU QUYẾT ĐỊNH. Icon/màu/audio đã precache trong webview ----\nconst p = { v:2, s:'alert', lv:a.alert_level, rt:a.risk_type, loc:a.id,\n  t, d, a:act, sz:a.sz, szn:a.szn, ts:Math.floor(Date.now()/1000) };\nconst b64 = Buffer.from(JSON.stringify(p),'utf8').toString('base64url');\n\nconst link_offline = CONFIG.BASE_URL + '/aether-view?data=' + b64;   // Zalo/Telegram — render OFFLINE\nconst link_short   = CONFIG.BASE_URL + '/aether-view?x=' + a.id;     // SMS — 1 đoạn, cần mạng\n\n// ---- SMS: text hành động là payload cứu người, link chỉ là bonus ----\n// Bỏ dấu tiếng Việt: GSM-7 160 ký tự/đoạn thay vì UCS-2 70 ký tự/đoạn (rẻ hơn ~2.3 lần)\nconst badge = a.alert_level==='CRITICAL' ? 'BAO DONG DO' : 'CANH BAO';\nconst shortName = a.name.replace(/^Xã /,'').replace(/\\s*\\(.*\\)$/,'');\n// Ghép có kiểm soát ngân sách ký tự: LINK LUÔN NGUYÊN VẸN, chỉ phần CHỮ bị cắt.\nfunction fitSms(head, link) {\n  const suffix = ' Xem: ' + link;\n  const budget = CONFIG.SMS_MAX_SEGMENTS*153 - suffix.length;\n  let h = stripVn(head);\n  if (h.length > budget) h = h.slice(0, Math.max(0, budget-1)).replace(/[\\s,.]+$/,'') + '.';\n  return h + suffix;\n}\nconst sms_head = badge + ': ' + t + ' tai ' + shortName + '. ' + act;\nconst sms_text = fitSms(sms_head, link_short);\n\nconst chat_text = (a.alert_level==='CRITICAL'?'🔴 BÁO ĐỘNG ĐỎ':'🟠 CẢNH BÁO') + ': ' + t + ' tại ' + a.name + '\\n\\n'\n  + act + '\\n\\n' + 'Bấm link xem bản đồ chạy đến điểm an toàn (mở được cả khi KHÔNG CÓ MẠNG):\\n' + link_offline + '\\n\\n'\n  + '🛰 Phân tích AI: ' + String(ctx.analysis.reasoning||'').slice(0,350);\n\nconst official_text = '📋 BẢN TIN CÁN BỘ BẢN — ' + a.name + ' (' + a.alert_level + ')\\n\\n'\n  + official.map((x,i)=>(i+1)+'. '+x).join('\\n')\n  + '\\n\\n🔊 KỊCH BẢN ĐỌC LOA:\\n\"' + loa + '\"\\n\\n📊 Số liệu: ' + JSON.stringify(a.metrics);\n\n// ---- Trạng thái loa: client /aether-loa-client poll endpoint này rồi tự phát tiếng ----\ntry {\n  $getWorkflowStaticData('global').latestLoa = {\n    ts:p.ts, loc:a.id, name:a.name, lv:a.alert_level, rt:a.risk_type,\n    loa_script:loa, title:t, action:act,\n    audio_url:''   // <-- điền URL mp3 tiếng Mông/Thái thu sẵn; để trống -> client đọc tiếng Việt bằng giọng máy\n  };\n} catch(e){}\n\nreturn { json: { alert_payload:p, link_offline, link_short, sms_text, sms_head, short_name:shortName,\n  sms_len:sms_text.length, sms_segments:Math.ceil(sms_text.length/153),\n  chat_text, official_text, loa_script:loa, official, xa_id:a.id, xa_name:a.name,\n  alert_level:a.alert_level, risk_type:a.risk_type } };"
+      },
+      "id": "7f33db48-5a8d-4d7a-9b66-5bf5e93732bd",
+      "name": "Build Alert Payload + Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3312,
+        640
+      ],
+      "notes": "Schema A.2 + base64. Tách kênh: SMS = text hành động + link ngắn (1 đoạn); Zalo/Telegram = link base64 OFFLINE (486 ký tự = 4 đoạn SMS -> không dùng cho SMS)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: 'YOUR_CHAT_ID', text: $json.chat_text + '\\n\\n———\\n' + $json.official_text, disable_web_page_preview: false }) }}",
+        "options": {}
+      },
+      "id": "55c461da-41c2-44e1-af7f-d700830b9409",
+      "name": "Gửi Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3520,
+        528
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://docs.google.com/spreadsheets/d/1G4VQTMN9TpxFzWihIDvnY0G_pqghzXhR2x8zSybMPJs/gviz/tq?tqx=out:csv&sheet=DanhBa",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "74cd9b76-8257-4288-b7cc-167e2aedbdad",
+      "name": "Đọc danh bạ dân cư",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3520,
+        768
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction parseCSV(text){\n  const rows=[];let row=[],cur='',q=false;\n  for(let i=0;i<text.length;i++){const c=text[i];\n    if(q){if(c==='\"'){if(text[i+1]==='\"'){cur+='\"';i++;}else q=false;}else cur+=c;}\n    else if(c==='\"')q=true;\n    else if(c===','){row.push(cur);cur='';}\n    else if(c==='\\n'){row.push(cur);rows.push(row);row=[];cur='';}\n    else if(c!=='\\r')cur+=c;}\n  if(cur!==''||row.length){row.push(cur);rows.push(row);}\n  if(!rows.length)return[];\n  const hdr=rows.shift().map(h=>h.trim().replace(/^\\ufeff/,''));\n  return rows.filter(r=>r.some(v=>String(v).trim()!==''))\n    .map(r=>{const o={};hdr.forEach((h,i)=>o[h]=String(r[i]==null?'':r[i]).trim());return o;});\n}\n\n// Ghép cảnh báo với danh bạ: lọc theo XÃ + trạng thái active, cá nhân hóa theo VAI TRÒ và SINH KẾ.\nconst csv = String(($input.first().json||{}).data || '');\nconst people = parseCSV(csv);\nif (!people.length) {\n  throw new Error('Không đọc được danh bạ. Kiểm tra: (1) SHEET_ID đúng chưa, (2) Google Sheet đã Share \"Anyone with the link\" chưa, (3) tên sheet là DanhBa.');\n}\n\nconst alerts = $('Build Alert Payload + Link').all().map(i=>i.json);\n\n// Lời nhắc thêm theo sinh kế — chỉ gắn khi loại rủi ro thực sự đe dọa sinh kế đó\nconst LIVELIHOOD = {\n  flood:     { lua_nuoc:'Khong ra dong, khong vot cui duoi suoi.', ngo_nuong:'Khong len nuong hom nay.',\n               chan_nuoi:'Lua trau bo len cho cao ngay.', thao_qua:'Khong vao rung, suoi len rat nhanh.' },\n  landslide: { ngo_nuong:'Khong len nuong duoi chan doc.', chan_nuoi:'Chuyen trau bo khoi chan taluy.',\n               thao_qua:'Khong vao rung, sat lo duong mon.' },\n  frost:     { lua_nuoc:'Giu nuoc am chan ma, che phu ni-long.', chan_nuoi:'Dua trau bo ve chuong, dot suoi, du rom.',\n               thao_qua:'Che goc thao qua, tranh chet ret.', ngo_nuong:'Che phu ngo non neu co.' },\n  fog:       { ngo_nuong:'Hoan len nuong den khi tan suong.', thao_qua:'Hoan vao rung, de lac duong.',\n               chan_nuoi:'Khong tha rong, de lac gia suc.' }\n};\n\n// Ghép có ngân sách ký tự: LINK LUÔN NGUYÊN VẸN, chỉ phần chữ bị cắt.\nconst SEG = 2*153;   // cảnh báo khẩn cho phép 2 đoạn (bản tin sáng vẫn giữ 1 đoạn)\nfunction fitSms(head, link) {\n  const suffix = ' Xem: ' + link;\n  const budget = SEG - suffix.length;\n  let h = stripVn(head);\n  if (h.length > budget) h = h.slice(0, Math.max(0, budget-1)).replace(/[\\s,.]+$/,'') + '.';\n  return h + suffix;\n}\n\nconst out = [];\nfor (const al of alerts) {\n  const rcps = people.filter(p => p.xa_id===al.xa_id && (p.trang_thai||'active')==='active' && p.so_dien_thoai);\n  for (const p of rcps) {\n    let text;\n    if (p.vai_tro === 'can_bo_ban') {\n      // Cán bộ bản: SMS ngắn báo có việc; checklist đầy đủ đẩy qua Telegram/Zalo\n      text = fitSms('CAN BO BAN ' + (p.ban||'') + ': ' + al.alert_payload.t + ' tai ' + al.short_name\n        + '. Kiem tra ho nguy co, chot ngam tran, phat loa ngay.', al.link_short);\n    } else {\n      const extra = ((LIVELIHOOD[al.risk_type]||{})[p.sinh_ke]) || '';\n      text = fitSms(al.sms_head + (extra ? ' ' + extra : ''), al.link_short);\n    }\n    out.push({ json: {\n      to: p.so_dien_thoai, ho_ten: p.ho_ten, ban: p.ban, xa_id: p.xa_id,\n      vai_tro: p.vai_tro, ngon_ngu: p.ngon_ngu, sinh_ke: p.sinh_ke,\n      message: text, len: text.length, segments: Math.ceil(text.length/153),\n      loai: 'canh_bao', alert_level: al.alert_level, risk_type: al.risk_type\n    }});\n  }\n}\nif (!out.length) return [{ json:{ __empty:true, note:'Không có người nhận active ở xã đang cảnh báo.' } }];\nreturn out;"
+      },
+      "id": "e83c7683-842c-4f2d-8b56-c8e213ded712",
+      "name": "Ghép người nhận",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3744,
+        768
+      ],
+      "notes": "Lọc theo XÃ + active. Cá nhân hoá theo VAI TRÒ (dân/cán bộ bản) và SINH KẾ (lúa nước/ngô nương/chăn nuôi/thảo quả)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-SMS-GATEWAY/message",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Basic YOUR_SMS_GATEWAY_AUTH"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.message, phoneNumbers: [$json.to] }) }}",
+        "options": {}
+      },
+      "id": "708b2ac7-a67d-4d6f-8b84-8828bb675e7e",
+      "name": "Gửi SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3968,
+        768
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "7b547487-bc7c-4342-9be5-c37a675040ac",
+      "name": "Không cảnh báo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2432,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "0984b641-aeb4-4a27-bf96-c51983fa94bd",
+      "name": "Schedule 02:00 (bias)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        1152
+      ],
+      "notes": "ERA5 trễ 5-7 ngày -> chạy 1 lần/ngày là đủ. 129 điểm × 24 lần = 6.192 request/ngày là vô lý."
+    },
+    {
+      "parameters": {
+        "url": "https://docs.google.com/spreadsheets/d/14sIbtzFO-S_uPbkI2gxUV0E1WpNT3Z-0V296BJ-HocE/gviz/tq?tqx=out:csv&sheet=DiaBan",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "750c978e-19c0-41da-8b75-32410eb856d3",
+      "name": "Đọc địa bàn (bias)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        1152
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction parseCSV(text){\n  const rows=[];let row=[],cur='',q=false;\n  for(let i=0;i<text.length;i++){const c=text[i];\n    if(q){if(c==='\"'){if(text[i+1]==='\"'){cur+='\"';i++;}else q=false;}else cur+=c;}\n    else if(c==='\"')q=true;\n    else if(c===','){row.push(cur);cur='';}\n    else if(c==='\\n'){row.push(cur);rows.push(row);row=[];cur='';}\n    else if(c!=='\\r')cur+=c;}\n  if(cur!==''||row.length){row.push(cur);rows.push(row);}\n  if(!rows.length)return[];\n  const hdr=rows.shift().map(h=>h.trim().replace(/^\\ufeff/,''));\n  return rows.filter(r=>r.some(v=>String(v).trim()!==''))\n    .map(r=>{const o={};hdr.forEach((h,i)=>o[h]=String(r[i]==null?'':r[i]).trim());return o;});\n}\nconst num = v => { const n = parseFloat(String(v==null?'':v).replace(',','.')); return isFinite(n)?n:null; };\n\n// Bias tính ở CẤP XÃ (45 request/ngày), không phải cấp điểm (129).\n// Lý do: bias là đặc tính của mô hình ở quy mô ~10km; ERA5 25km không phân giải mịn hơn được.\n// Các điểm trong cùng xã dùng chung bias của xã đó.\nconst csv = String((($input.first()||{}).json||{}).data || '');\nconst rows = parseCSV(csv).filter(r => r.xa_id && (r.trang_thai||'active')==='active')\n  .filter(r => num(r.lat)!=null && num(r.lon)!=null);\nif (!rows.length) return [{ json:{ __skip:true, note:'Sổ địa bàn chưa có toạ độ -> bỏ qua vòng hiệu chuẩn.' } }];\nreturn rows.map(r => ({ json:{ xa_id:r.xa_id, name:r.ten_day_du, lat:num(r.lat), lon:num(r.lon) } }));"
+      },
+      "id": "ce2edf9e-aa4e-40b2-8519-ce9642f2b72a",
+      "name": "Điểm hiệu chuẩn (cấp xã)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        1152
+      ],
+      "notes": "Hiệu chuẩn ở CẤP XÃ (45), không phải 129 điểm: ERA5 chỉ 25km, mịn hơn cấp xã là vô nghĩa."
+    },
+    {
+      "parameters": {
+        "url": "=https://archive-api.open-meteo.com/v1/archive?latitude={{ $json.lat }}&longitude={{ $json.lon }}&start_date={{ $now.minus({ days: 20 }).toFormat('yyyy-MM-dd') }}&end_date={{ $now.minus({ days: 8 }).toFormat('yyyy-MM-dd') }}&daily=precipitation_sum&models=era5_land,era5&timezone=Asia%2FBangkok",
+        "options": {}
+      },
+      "id": "98132579-a050-457f-aed1-e89734302e3e",
+      "name": "ERA5 archive (bias)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        1152
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Xin CẢ HAI model: ERA5-Land 9km trễ THẬT 1-2 tuần (hay trả toàn null mà node vẫn 200 OK); ERA5 25km trễ 5 ngày, luôn có. Code tự ưu tiên Land, rơi về ERA5."
+    },
+    {
+      "parameters": {
+        "url": "=https://archive-api.open-meteo.com/v1/archive?latitude={{ $json.lat }}&longitude={{ $json.lon }}&start_date={{ $now.minus({ days: 20 }).toFormat('yyyy-MM-dd') }}&end_date={{ $now.minus({ days: 8 }).toFormat('yyyy-MM-dd') }}&daily=precipitation_sum&models=best_match&timezone=Asia%2FBangkok",
+        "options": {}
+      },
+      "id": "01c856e9-1fd2-4346-b7ff-86c50103e7d7",
+      "name": "Open-Meteo lịch sử (bias)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        1152
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tính bias từng xã = ERA5 − Open-Meteo trên CÙNG cửa sổ ngày, lưu cache cho Consensus dùng.\n// ⚠️ ERA5-Land (9km) trễ THẬT 1-2 tuần -> hay trả toàn null mà node vẫn 200 OK.\n//    Vì vậy xin cả era5_land lẫn era5 (25km, trễ 5 ngày) rồi quét key, ưu tiên Land.\nconst pts = $('Điểm hiệu chuẩn (cấp xã)').all().map(i=>i.json);\nconst era = $('ERA5 archive (bias)').all().map(i=>i.json);\nconst omh = $('Open-Meteo lịch sử (bias)').all().map(i=>i.json);\n\nconst out = {}; let okLand=0, okEra5=0, fail=0;\npts.forEach((P,i) => {\n  const ed = ((era[i]||{}).daily)||{};\n  const od = ((omh[i]||{}).daily)||{};\n  if (!(ed.time||[]).length || !(od.time||[]).length) { fail++; return; }\n\n  const keys = Object.keys(ed).filter(k => k.indexOf('precipitation_sum')===0);\n  const prefer = ['precipitation_sum_era5_land','precipitation_sum','precipitation_sum_era5'];\n  const ordered = prefer.filter(k=>keys.indexOf(k)>=0).concat(keys.filter(k=>prefer.indexOf(k)<0));\n  const omMap = {}; (od.time||[]).forEach((t,k)=>{ omMap[t]=(od.precipitation_sum||[])[k]; });\n\n  for (const key of ordered) {\n    const arr = ed[key]||[];\n    let es=0, os=0, n=0;\n    ed.time.forEach((t,k)=>{ const ev=arr[k];\n      if (ev!=null && omMap[t]!=null) { es+=ev; os+=omMap[t]; n++; } });\n    if (n>0) {\n      const src = key.replace('precipitation_sum','').replace(/^_/,'') || 'era5_land';\n      out[P.xa_id] = { bias_mm:+(es-os).toFixed(1), per_day:+((es-os)/n).toFixed(2),\n                       n_days:n, source:src, updated_at:new Date().toISOString() };\n      if (src==='era5_land') okLand++; else okEra5++;\n      return;\n    }\n  }\n  fail++;\n});\n\ntry { $getWorkflowStaticData('global').biasByCommune = out; } catch(e){}\nreturn [{ json:{ n_communes:pts.length, calibrated:Object.keys(out).length,\n  from_era5_land:okLand, from_era5:okEra5, failed:fail,\n  note: fail ? (fail + ' xã không hiệu chuẩn được -> Consensus dùng dự báo thô cho các xã đó.') : 'Hiệu chuẩn đủ toàn tỉnh.' } }];"
+      },
+      "id": "a6487da3-0138-424c-85ad-401f1f1b7296",
+      "name": "Tính bias & lưu cache",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        1152
+      ],
+      "notes": "bias = ERA5 − Open-Meteo trên cùng cửa sổ ngày -> mm/ngày từng xã. Pipeline chính đọc từ cache."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 5 * * *"
+            }
+          ]
+        }
+      },
+      "id": "828c9320-9a86-4679-a6bf-deccb8321990",
+      "name": "Schedule 05:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        1344
+      ],
+      "notes": "Sương mù/rét xảy ra hàng chục ngày/năm. Hệ thống hữu ích mỗi sáng thì dân mới còn nhớ nó khi lũ về."
+    },
+    {
+      "parameters": {
+        "url": "https://docs.google.com/spreadsheets/d/1sYS21ay7Pv3X2meU1tgFjUg7BGHz6QHR5_tcO_7PBbI/gviz/tq?tqx=out:csv&sheet=DanhBa",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "8cfc672a-9dc6-4765-9610-beb59244c282",
+      "name": "Đọc danh bạ (bản tin sáng)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        1344
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Chuẩn hoá số điện thoại VN sang E.164 (+84) cho SMS gateway quốc tế\nfunction toE164(sdt){\n  var s = String(sdt==null?'':sdt).replace(/[^0-9+]/g,'');\n  if(s.indexOf('+')===0) return s;\n  if(s.indexOf('84')===0 && s.length>=11) return '+'+s;\n  if(s.indexOf('0')===0) return '+84'+s.slice(1);\n  if(s.length===9) return '+84'+s;\n  return s;\n}\n\nfunction stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction parseCSV(text){\n  const rows=[];let row=[],cur='',q=false;\n  for(let i=0;i<text.length;i++){const c=text[i];\n    if(q){if(c==='\"'){if(text[i+1]==='\"'){cur+='\"';i++;}else q=false;}else cur+=c;}\n    else if(c==='\"')q=true;\n    else if(c===','){row.push(cur);cur='';}\n    else if(c==='\\n'){row.push(cur);rows.push(row);row=[];cur='';}\n    else if(c!=='\\r')cur+=c;}\n  if(cur!==''||row.length){row.push(cur);rows.push(row);}\n  if(!rows.length)return[];\n  const hdr=rows.shift().map(h=>h.trim().replace(/^\\ufeff/,''));\n  return rows.filter(r=>r.some(v=>String(v).trim()!==''))\n    .map(r=>{const o={};hdr.forEach((h,i)=>o[h]=String(r[i]==null?'':r[i]).trim());return o;});\n}\n\n// BẢN TIN SÁNG (5h) — dự báo + khuyến nông, gom theo NHÓM (xã × sinh kế) để tiết kiệm token.\n// 3 xã × tối đa 5 nhóm sinh kế = tối đa 15 lời gọi LLM/ngày thay vì 1 lời gọi/người.\nconst MODEL = 'DeepSeek-V4-Flash';  // <-- THAY: model ID từ marketplace.fptcloud.com\n\nconst csv = String(($input.first().json||{}).data || '');\nconst people = parseCSV(csv).filter(p=>(p.trang_thai||'active')==='active' && p.so_dien_thoai);\nlet fc = null;\ntry { fc = $getWorkflowStaticData('global').latestForecast || null; } catch(e){}\nif (!fc || !fc.locations) {\n  return [{ json:{ __skip:true, note:'Chưa có cache dự báo — pipeline chính phải chạy ít nhất 1 lần trước.' } }];\n}\n\nconst WMO = {0:'trời quang',1:'ít mây',2:'có mây',3:'nhiều mây',45:'sương mù',48:'sương mù đóng băng',\n  51:'mưa phùn nhẹ',53:'mưa phùn',55:'mưa phùn nặng hạt',61:'mưa nhỏ',63:'mưa',65:'mưa to',\n  71:'tuyết nhẹ',73:'tuyết',80:'mưa rào nhẹ',81:'mưa rào',82:'mưa rào rất to',95:'dông',96:'dông kèm mưa đá'};\nconst SINH_KE_VN = { lua_nuoc:'trồng lúa nước', ngo_nuong:'trồng ngô trên nương',\n  chan_nuoi:'chăn nuôi trâu bò', thao_qua:'trồng thảo quả trong rừng', khac:'sinh kế khác' };\n\nconst groups = [];\nfor (const L of fc.locations) {\n  const d = L.daily || {};\n  const today = {\n    ngay: (d.time||[])[0],\n    nhiet_do_thap: (d.t_min||[])[0], nhiet_do_cao: (d.t_max||[])[0],\n    luong_mua_mm: (d.precip_sum||[])[0],\n    thoi_tiet: WMO[(d.weather_code||[])[0]] || 'thay đổi',\n    tam_nhin_m: (L.metrics||{}).visibility_min_m,\n    muc_canh_bao: L.alert_level, loai_rui_ro: L.risk_type\n  };\n  const dp3 = (d.time||[]).slice(0,3).map((t,i)=>({ngay:t,\n    thap:(d.t_min||[])[i], cao:(d.t_max||[])[i], mua_mm:(d.precip_sum||[])[i],\n    troi:WMO[(d.weather_code||[])[i]]||'thay đổi'}));\n\n  // Số liệu thật để node SMS chèn thẳng (không để AI bịa)\n  const wf_facts = {\n    ngay: today.ngay, thap: today.nhiet_do_thap, cao: today.nhiet_do_cao,\n    mua_mm: today.luong_mua_mm, troi: today.thoi_tiet,\n    mua_3ngay: dp3.map(x=>x.mua_mm),\n    canh_bao: L.alert_level, rui_ro: L.risk_type\n  };\n  const sks = [...new Set(people.filter(p=>p.xa_id===L.id).map(p=>p.sinh_ke||'khac'))];\n  for (const sk of sks) {\n    const rcps = people.filter(p=>p.xa_id===L.id && (p.sinh_ke||'khac')===sk);\n    if (!rcps.length) continue;\n\n    const system = [\n      '# ROLE',\n      'Bạn là cán bộ khuyến nông kiêm truyền thông thời tiết cho bà con dân tộc thiểu số vùng cao Điện Biên.',\n      '# TASK',\n      'Viết bản tin thời tiết buổi sáng gửi qua SMS cho nhóm bà con làm nghề: ' + (SINH_KE_VN[sk]||sk) + '.',\n      'Bản tin phải trả lời đúng 2 câu hỏi của bà con: \"Hôm nay trời thế nào?\" và \"Vậy tôi nên làm gì với công việc của tôi?\".',\n      '# RULES',\n      '1. \"thoi_tiet\": 1 câu, tối đa 12 từ, nói trời hôm nay + nhiệt độ. Không dùng mm, %, hPa.',\n      '2. \"khuyen_nghi\": 1 câu, tối đa 14 từ, việc CẦN LÀM hoặc CẦN TRÁNH hôm nay, gắn thẳng với nghề ' + (SINH_KE_VN[sk]||sk) + '.',\n      '   Phải cụ thể theo mùa vụ và tập quán vùng cao (đi nương, thả trâu bò, phơi thóc, vào rừng...).',\n      '   Nếu thời tiết bình thường, vẫn đưa lời khuyên hữu ích (VD: tranh thủ phơi thóc, tra ngô).',\n      '3. Ngôn ngữ đời thường, như người cùng bản nói với nhau. Không thuật ngữ.',\n      '4. Trả về DUY NHẤT JSON: {\"thoi_tiet\":\"...\",\"khuyen_nghi\":\"...\"} — không markdown.'\n    ].join('\\n');\n    const user = JSON.stringify({ dia_diem:L.name, hom_nay:today, ba_ngay_toi:dp3, nghe_cua_ba_con:SINH_KE_VN[sk]||sk });\n\n    groups.push({ json: {\n      xa_id:L.id, xa_name:L.name, weather_facts:wf_facts, sinh_ke:sk,\n      recipients: rcps.map(p=>({to:toE164(p.so_dien_thoai), ho_ten:p.ho_ten, ban:p.ban, vai_tro:p.vai_tro, ngon_ngu:p.ngon_ngu})),\n      alert_level: L.alert_level,\n      request_body:{ model:MODEL, messages:[{role:'system',content:system},{role:'user',content:user}],\n                     temperature:0.5, max_tokens:250 }\n    }});\n  }\n}\nreturn groups;"
+      },
+      "id": "c45d9ff5-368d-4cac-92cc-425c71c06592",
+      "name": "Nhóm sinh kế + soạn prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        1344
+      ],
+      "notes": "Gom theo (xã × sinh kế) -> tối đa ~225 call/ngày cho 45 xã, thay vì 1 call/người."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mkp-api.fptcloud.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-gy9l_NWmwjIQBvu-ySPEFfzSbmVxkJYgLVRFp3t1UKw="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {}
+      },
+      "id": "a68b482a-d1ad-4062-994d-1cfed1277445",
+      "name": "AI Agent 3 — Khuyến nông",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        1344
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "78ZOVcfUsChDxuOG",
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.sms-gate.app/3rdparty/v1/message",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"textMessage\": { \"text\": \"{{ $json.message }}\" },\n  \"phoneNumbers\": [\"{{ $json.to }}\"]\n}",
+        "options": {}
+      },
+      "id": "2386b00a-041d-46d3-8739-acf1832d3d9f",
+      "name": "Gửi SMS (bản tin sáng)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1104,
+        1344
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "9EYpuJEXb301U8Qh",
+          "name": "Unnamed credential"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "path": "aether-forecast",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "7114c130-2771-4d45-887a-175806c78010",
+      "name": "Webhook /forecast",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1568
+      ],
+      "webhookId": "ba007c43-10ba-4d36-8b9d-f5edfadfbc1d"
+    },
+    {
+      "parameters": {
+        "jsCode": "let data=null;\ntry { data = $getWorkflowStaticData('global').latestForecast || null; } catch(e){}\nif (!data) data = { status:'warming_up',\n  message:'Chưa có dữ liệu. Workflow phải ở trạng thái Active và pipeline đã chạy ít nhất 1 chu kỳ — hoặc gọi POST /webhook/aether-simulate để kích hoạt Demo Mode.' };\nreturn [{ json:data }];"
+      },
+      "id": "662cde03-e74f-476d-b51a-a041a67d5415",
+      "name": "Đọc cache dự báo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        1568
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "3914a101-6feb-46d4-8289-0a19270eefb0",
+      "name": "Respond Forecast",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        1568
+      ]
+    },
+    {
+      "parameters": {
+        "path": "aether-view",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "d9b68cc2-0867-44f4-955e-8e2af6fc2fd8",
+      "name": "Webhook /view",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1744
+      ],
+      "webhookId": "d8629471-4adb-4df5-a11f-baed455c11cf"
+    },
+    {
+      "parameters": {
+        "jsCode": "const html = \"<!DOCTYPE html>\\n<html lang=\\\"vi\\\"><head>\\n<meta charset=\\\"utf-8\\\">\\n<meta name=\\\"viewport\\\" content=\\\"width=device-width,initial-scale=1,viewport-fit=cover\\\">\\n<meta name=\\\"theme-color\\\" content=\\\"#D32F2F\\\">\\n<title>Aether-DB — Cảnh báo thời tiết Điện Biên</title>\\n<style>\\n*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}\\nbody{font-family:system-ui,-apple-system,\\\"Segoe UI\\\",Roboto,sans-serif;background:#F4F6F8;color:#111;min-height:100vh}\\n.wrap{max-width:440px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column}\\n.alert{flex:1;display:flex;flex-direction:column;padding:16px 16px 26px;color:#fff}\\n.alert.CRITICAL{background:#D32F2F}.alert.WARNING{background:#F57C00}\\n.ico{display:flex;justify-content:center;margin:2px 0}\\n.ico svg{width:132px;height:132px}\\n.pulse{animation:pl 1.5s ease-in-out infinite}@keyframes pl{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.72;transform:scale(.93)}}\\nh1{font-size:33px;line-height:1.08;font-weight:800;text-align:center;letter-spacing:-.5px;margin:4px 0 8px}\\n.desc{font-size:16px;text-align:center;opacity:.95;margin-bottom:14px;line-height:1.35}\\n/* ---- PICTOGRAM HÀNH ĐỘNG: 3 khung, hiểu được KHÔNG CẦN BIẾT CHỮ ---- */\\n.picto{background:#fff;border-radius:20px;padding:16px 10px 12px;margin-bottom:12px;\\n  box-shadow:0 8px 24px rgba(0,0,0,.28)}\\n.pgrid{display:flex;align-items:center;justify-content:center;gap:4px}\\n.pcell{flex:1;text-align:center}\\n.pcell svg{width:100%;max-width:82px;height:78px}\\n.parrow{width:26px;flex:0 0 26px}\\n.parrow svg{width:26px;height:26px}\\n.no{position:relative;display:inline-block}\\n.act{color:#000;text-align:center;font-size:24px;font-weight:800;line-height:1.2;\\n  margin-top:10px;padding-top:10px;border-top:2px dashed #E0E0E0}\\n.row{display:flex;gap:11px;align-items:center;margin-bottom:12px}\\n.spk{width:80px;height:80px;min-width:80px;border-radius:50%;background:#fff;border:none;display:flex;\\n  align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.25)}\\n.spk svg{width:40px;height:40px}\\n.spk.on{animation:pl .8s infinite}\\n.langs{display:flex;gap:7px;flex-wrap:wrap}\\n.lang{padding:12px 14px;border-radius:999px;border:2px solid rgba(255,255,255,.55);background:transparent;\\n  color:#fff;font-size:15px;font-weight:700;cursor:pointer}\\n.lang.sel{background:#fff;color:#000;border-color:#fff}\\n.map{background:rgba(0,0,0,.18);border-radius:18px;overflow:hidden;margin-bottom:11px}\\n.map svg{width:100%;display:block}\\n.badge{display:flex;align-items:center;justify-content:center;gap:7px;font-size:13.5px;font-weight:700;\\n  background:rgba(0,0,0,.22);border-radius:999px;padding:9px;margin-bottom:8px}\\n.badge svg{width:17px;height:17px}\\n.ts{text-align:center;font-size:12.5px;opacity:.85}\\n.fc{flex:1;display:flex;flex-direction:column;padding:12px 12px 22px}\\n.seg{display:flex;background:#E3E7EB;border-radius:14px;padding:4px;margin-bottom:12px;overflow-x:auto}\\n.seg button{flex:1;min-width:92px;border:none;background:transparent;padding:13px 6px;border-radius:11px;\\n  font-size:14px;font-weight:700;color:#5A6672;cursor:pointer;white-space:nowrap}\\n.seg button.sel{background:#fff;color:#111;box-shadow:0 2px 6px rgba(0,0,0,.12)}\\n.hero{background:#fff;border-radius:22px;padding:20px 16px;text-align:center;box-shadow:0 3px 14px rgba(0,0,0,.07);margin-bottom:12px}\\n.hero svg{width:112px;height:112px}\\n.stat{font-size:25px;font-weight:800;margin:6px 0 2px;line-height:1.15}\\n.temp{font-size:62px;font-weight:800;letter-spacing:-3px;line-height:1}\\n.scale{display:flex;gap:6px;margin-bottom:12px}\\n.lv{flex:1;border-radius:14px;padding:11px 3px;text-align:center;opacity:.32;transition:.2s}\\n.lv.on{opacity:1;transform:scale(1.06);box-shadow:0 5px 16px rgba(0,0,0,.22)}\\n.lv svg{width:25px;height:25px;display:block;margin:0 auto 3px}\\n.lv span{font-size:10.5px;font-weight:800;color:#fff;display:block}\\n.lv.SAFE{background:#2E7D32}.lv.ADVISORY{background:#F9A825}.lv.WARNING{background:#F57C00}.lv.CRITICAL{background:#D32F2F}\\n.days{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px}\\n.day{min-width:76px;background:#fff;border-radius:16px;padding:11px 5px;text-align:center;\\n  box-shadow:0 2px 8px rgba(0,0,0,.06);border-top:5px solid transparent}\\n.day.SAFE{border-top-color:#2E7D32}.day.ADVISORY{border-top-color:#F9A825}\\n.day.WARNING{border-top-color:#F57C00}.day.CRITICAL{border-top-color:#D32F2F}\\n.dn{font-size:12.5px;font-weight:800;color:#5A6672}\\n.day svg{width:40px;height:40px;margin:4px 0}\\n.dt{font-size:15px;font-weight:800}.dt small{color:#8A96A3;font-weight:700}\\n.foot{margin-top:14px;display:flex;align-items:center;justify-content:center;gap:6px;font-size:12px;color:#5A6672;text-align:center}\\n.dot{width:8px;height:8px;border-radius:50%;background:#2E7D32;flex:0 0 8px}\\n.load{padding:70px 20px;text-align:center;color:#8A96A3;font-size:15px}\\n#swtag{position:fixed;left:50%;transform:translateX(-50%);bottom:8px;background:#111;color:#fff;\\n  font-size:11px;padding:6px 12px;border-radius:999px;opacity:0;transition:.4s;pointer-events:none;z-index:9}\\n#swtag.on{opacity:.88}\\n\\n.fcw{flex:1;display:flex;flex-direction:column;background:#f8fafc}\\n.selwrap{background:#fff;padding:14px 12px 12px;box-shadow:0 1px 0 #e2e8f0}\\n.seg2{display:flex;background:#f1f5f9;border-radius:18px;padding:4px;gap:4px;overflow-x:auto}\\n.seg2 button{flex:1;min-width:84px;min-height:56px;border:none;border-radius:14px;cursor:pointer;background:transparent;\\n  transition:.18s;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 6px}\\n.seg2 button.sel{background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.12)}\\n.dot2{width:10px;height:10px;border-radius:50%;transition:.18s;flex-shrink:0}\\n.snm{font-size:12px;font-weight:500;color:#64748b;line-height:1.2;text-align:center}\\n.seg2 button.sel .snm{font-weight:800;color:#0f172a}\\n.hero2{flex:0 0 42vh;min-height:270px;display:flex;flex-direction:column;align-items:center;justify-content:center;\\n  padding:24px 20px 28px;position:relative;overflow:hidden}\\n.halo{position:absolute;border-radius:50%;top:50%;left:50%;pointer-events:none}\\n.halo1{width:260px;height:260px;background:rgba(255,255,255,.12);transform:translate(-50%,-56%)}\\n.halo2{width:160px;height:160px;background:rgba(255,255,255,.10);transform:translate(-50%,-58%)}\\n.hicon{position:relative;z-index:1;margin-bottom:8px}\\n.hline{position:relative;z-index:1;font-size:22px;font-weight:900;letter-spacing:1.5px;color:#fff;text-align:center;\\n  line-height:1.2;text-shadow:0 1px 4px rgba(0,0,0,.25);margin-bottom:4px}\\n.hdate{position:relative;z-index:1;font-size:13px;font-weight:600;color:rgba(255,255,255,.9);text-align:center;margin-bottom:10px;text-shadow:0 1px 3px rgba(0,0,0,.2)}\\n.d2d{font-size:10px;font-weight:700;color:#94a3b8;margin-top:-2px}\\n.htemp{position:relative;z-index:1;display:flex;align-items:flex-start;line-height:1}\\n.hnum{font-size:92px;font-weight:900;color:#fff;letter-spacing:-6px;text-shadow:0 2px 8px rgba(0,0,0,.2);line-height:1}\\n.hdeg{font-size:34px;font-weight:700;color:#fff;margin-top:12px;text-shadow:0 1px 4px rgba(0,0,0,.2)}\\n.scale2{background:#fff;padding:14px 10px 12px;display:flex;gap:6px;box-shadow:0 1px 0 #e2e8f0}\\n.lv2{flex:1;border-radius:16px;padding:10px 6px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;\\n  border:2px solid transparent;transition:.22s cubic-bezier(.34,1.56,.64,1)}\\n.lv2.on{flex:1.35;padding:14px 8px 12px;transform:translateY(-5px) scale(1.03)}\\n.lv2 span{font-size:10px;font-weight:800;letter-spacing:.4px;text-align:center;line-height:1.1}\\n.lv2.on span{font-size:11px}\\n.days2wrap{background:#fff;padding:14px 0 18px}\\n.days2{display:flex;gap:10px;overflow-x:auto;padding:0 12px}\\n.day2{min-width:70px;max-width:70px;min-height:120px;border-radius:18px;border:1.5px solid #e2e8f0;\\n  padding:10px 6px 12px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;flex-shrink:0}\\n.d2n{font-size:11px;font-weight:800;letter-spacing:.2px;text-align:center;line-height:1.1}\\n.d2t{font-size:16px;font-weight:900;color:#0f172a;line-height:1}\\n.d2t small{display:block;font-size:12px;font-weight:600;color:#94a3b8;margin-top:1px}\\n.foot2{margin-top:auto;background:#fff;border-top:1px solid #e2e8f0;padding:14px 16px 22px;display:flex;flex-direction:column;align-items:center;gap:8px}\\n.frow{display:flex;align-items:center;gap:7px;font-size:13px;color:#475569;font-weight:500}\\n.frow svg{width:15px;height:15px;color:#64748b}\\n.fchip{display:flex;align-items:center;gap:6px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:20px;padding:6px 14px;font-size:13px;color:#166534;font-weight:600}\\n\\n.fcw{flex:1;display:flex;flex-direction:column;background:#f2f4f7}\\n.xbar{background:#fff;padding:12px 0 10px;box-shadow:0 1px 0 #e8ebee;position:sticky;top:0;z-index:5}\\n.xrow{display:flex;gap:8px;overflow-x:auto;padding:0 14px;scrollbar-width:none}\\n.xrow::-webkit-scrollbar{display:none}\\n.xchip{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:8px 14px;border-radius:999px;\\n  border:1.5px solid #e3e7ec;background:#fff;font-size:13.5px;font-weight:600;color:#5a6672;cursor:pointer;white-space:nowrap;transition:.15s}\\n.xchip.on{background:#111827;border-color:#111827;color:#fff}\\n.xdot{width:8px;height:8px;border-radius:50%;flex-shrink:0}\\n.hero3{position:relative;padding:26px 20px 30px;display:flex;flex-direction:column;align-items:center;color:#fff;overflow:hidden}\\n.h3top{font-size:19px;font-weight:700;letter-spacing:.3px;text-shadow:0 1px 3px rgba(0,0,0,.2)}\\n.h3date{font-size:13px;font-weight:500;opacity:.9;margin-top:3px;text-shadow:0 1px 2px rgba(0,0,0,.2)}\\n.h3ico{margin:6px 0 2px}\\n.h3temp{font-size:88px;font-weight:200;line-height:.9;letter-spacing:-4px;text-shadow:0 2px 10px rgba(0,0,0,.15);position:relative}\\n.h3temp span{font-size:40px;font-weight:300;position:absolute;top:6px}\\n.h3stat{font-size:17px;font-weight:700;margin-top:8px;letter-spacing:.5px;text-shadow:0 1px 3px rgba(0,0,0,.2)}\\n.h3sub{font-size:14px;font-weight:500;opacity:.92;margin-top:2px;text-shadow:0 1px 2px rgba(0,0,0,.2)}\\n.scale2{background:#fff;padding:12px 10px;display:flex;gap:6px;box-shadow:0 1px 0 #e8ebee}\\n.lv2{flex:1;border-radius:15px;padding:9px 4px 7px;display:flex;flex-direction:column;align-items:center;gap:5px;border:2px solid transparent;transition:.22s cubic-bezier(.34,1.4,.64,1)}\\n.lv2.on{flex:1.3;transform:translateY(-4px)}\\n.lv2 span{font-size:9.5px;font-weight:800;letter-spacing:.3px;text-align:center}\\n.tabs{background:#fff;display:flex;gap:8px;padding:6px 14px 12px}\\n.tab{flex:1;padding:10px;border-radius:12px;border:none;background:#eef1f4;font-size:12.5px;font-weight:800;letter-spacing:.5px;color:#8a96a3;cursor:pointer;transition:.15s}\\n.tab.on{background:#111827;color:#fff}\\n.days2wrap,.hourwrap{background:#fff;padding:4px 0 16px}\\n.days2,.hourrow{display:flex;gap:9px;overflow-x:auto;padding:8px 14px;scrollbar-width:none}\\n.days2::-webkit-scrollbar,.hourrow::-webkit-scrollbar{display:none}\\n.day2{position:relative;min-width:72px;max-width:72px;border-radius:18px;border:1.5px solid #eef1f4;\\n  padding:11px 6px 14px;display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;overflow:hidden}\\n.d2n{font-size:12px;font-weight:800;color:#374151}\\n.d2d{font-size:10px;font-weight:600;color:#9aa5b1;margin-bottom:1px}\\n.d2p{font-size:10.5px;font-weight:700;color:#3b82f6;margin-top:1px}\\n.d2t{font-size:15px;font-weight:800;color:#111827;margin-top:1px}\\n.d2t small{font-size:11px;font-weight:600;color:#9aa5b1}\\n.d2bar{position:absolute;bottom:0;left:0;right:0;height:4px}\\n.hcell{min-width:60px;border-radius:16px;padding:10px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;background:#f7f9fb;border:1.5px solid #eef1f4}\\n.hcell.now{background:#111827;border-color:#111827}\\n.hcell.now .hlb,.hcell.now .hpart,.hcell.now .hpc{color:#fff}\\n.hlb{font-size:12px;font-weight:800;color:#374151}\\n.hpart{font-size:9px;font-weight:700;color:#9aa5b1;letter-spacing:.3px}\\n.hpc{font-size:11px;font-weight:700;color:#3b82f6}\\n.foot2{margin-top:auto;background:#fff;border-top:1px solid #eef1f4;padding:13px 16px 22px;display:flex;flex-direction:column;align-items:center;gap:8px}\\n.frow{display:flex;align-items:center;gap:7px;font-size:12.5px;color:#5a6672;font-weight:500}\\n.frow svg{width:14px;height:14px;color:#8a96a3}\\n.fchip{display:flex;align-items:center;gap:6px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:20px;padding:6px 13px;font-size:12.5px;color:#166534;font-weight:600}\\n</style></head>\\n<body><div class=\\\"wrap\\\" id=\\\"app\\\"><div class=\\\"load\\\">Đang tải…</div></div><div id=\\\"swtag\\\"></div>\\n<script>\\nvar ICONS={\\n flood:'<path d=\\\"M32 8c-9 12-16 20-16 28a16 16 0 0032 0c0-8-7-16-16-28z\\\" fill=\\\"currentColor\\\"/><path d=\\\"M2 50c6 0 6-4 12-4s6 4 12 4 6-4 12-4 6 4 12 4 6-4 12-4\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\"/><path d=\\\"M2 60c6 0 6-4 12-4s6 4 12 4 6-4 12-4 6 4 12 4 6-4 12-4\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\"/>',\\n landslide:'<path d=\\\"M4 56L26 18l14 22 8-10 12 26z\\\" fill=\\\"currentColor\\\"/><circle cx=\\\"42\\\" cy=\\\"14\\\" r=\\\"5\\\" fill=\\\"currentColor\\\"/><circle cx=\\\"52\\\" cy=\\\"24\\\" r=\\\"4\\\" fill=\\\"currentColor\\\"/><circle cx=\\\"34\\\" cy=\\\"8\\\" r=\\\"3\\\" fill=\\\"currentColor\\\"/>',\\n frost:'<path d=\\\"M32 4v56M8 18l48 28M56 18L8 46\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"5\\\" stroke-linecap=\\\"round\\\"/><path d=\\\"M32 14l-7 7M32 14l7 7M32 50l-7-7M32 50l7-7\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"5\\\" stroke-linecap=\\\"round\\\"/>',\\n fog:'<path d=\\\"M18 26a12 12 0 0124 0 10 10 0 011 20H20a10 10 0 01-2-20z\\\" fill=\\\"currentColor\\\" opacity=\\\".55\\\"/><path d=\\\"M6 50h52M10 58h44M14 42h36\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"5\\\" stroke-linecap=\\\"round\\\"/>',\\n rain:'<path d=\\\"M18 22a12 12 0 0124 0 10 10 0 011 20H20a10 10 0 01-2-20z\\\" fill=\\\"currentColor\\\"/><path d=\\\"M22 48l-3 8M32 48l-3 8M42 48l-3 8\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"4\\\" stroke-linecap=\\\"round\\\"/>',\\n sun:'<circle cx=\\\"32\\\" cy=\\\"32\\\" r=\\\"13\\\" fill=\\\"currentColor\\\"/><path d=\\\"M32 6v8M32 50v8M6 32h8M50 32h8M13 13l6 6M45 45l6 6M51 13l-6 6M19 45l-6 6\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"4\\\" stroke-linecap=\\\"round\\\"/>',\\n cloud:'<path d=\\\"M18 26a12 12 0 0124 0 10 10 0 011 20H20a10 10 0 01-2-20z\\\" fill=\\\"currentColor\\\"/>',\\n storm:'<path d=\\\"M18 20a12 12 0 0124 0 10 10 0 011 20H20a10 10 0 01-2-20z\\\" fill=\\\"currentColor\\\"/><path d=\\\"M34 42l-8 12h7l-4 10 12-14h-7l4-8z\\\" fill=\\\"currentColor\\\"/>',\\n check:'<path d=\\\"M12 32l14 14 26-28\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"7\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\"/>',\\n warn:'<path d=\\\"M32 8l26 46H6z\\\" fill=\\\"none\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"5\\\" stroke-linejoin=\\\"round\\\"/><path d=\\\"M32 24v14M32 45v2\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"5\\\" stroke-linecap=\\\"round\\\"/>',\\n bang:'<path d=\\\"M32 6L4 56h56z\\\" fill=\\\"currentColor\\\"/><path d=\\\"M32 24v14M32 45v3\\\" stroke=\\\"#fff\\\" stroke-width=\\\"5\\\" stroke-linecap=\\\"round\\\"/>',\\n speaker:'<path d=\\\"M8 24h10l14-12v40L18 40H8z\\\" fill=\\\"#000\\\"/><path d=\\\"M42 20a18 18 0 010 24M50 14a26 26 0 010 36\\\" stroke=\\\"#000\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\"/>',\\n plane:'<path d=\\\"M32 4l6 22 22 6-22 6-6 22-6-22-22-6 22-6z\\\" fill=\\\"currentColor\\\"/>'\\n};\\n/* --- PICTOGRAM: nét dày, đọc được ở 24px, KHÔNG CHỮ --- */\\nvar P={\\n house:'<path d=\\\"M10 44V26L32 10l22 16v18z\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" stroke-linejoin=\\\"round\\\"/><path d=\\\"M26 44V32h12v12\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\"/>',\\n run:'<circle cx=\\\"36\\\" cy=\\\"12\\\" r=\\\"6\\\" fill=\\\"#111\\\"/><path d=\\\"M34 20l-8 10 6 8-6 12M34 20l10 6 6-2M26 30l-9 3\\\" stroke=\\\"#111\\\" stroke-width=\\\"4.5\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\"/>',\\n hill:'<path d=\\\"M4 50L22 24l12 16 8-10 14 20z\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" stroke-linejoin=\\\"round\\\"/><path d=\\\"M42 24V8l12 5-12 5\\\" fill=\\\"#111\\\"/>',\\n stream:'<path d=\\\"M4 22c8 0 8 8 16 8s8-8 16-8 8 8 16 8 8-8 12-8\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\"/><path d=\\\"M4 40c8 0 8 8 16 8s8-8 16-8 8 8 16 8 8-8 12-8\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\"/>',\\n cow:'<path d=\\\"M12 30h34v16H12z\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" stroke-linejoin=\\\"round\\\"/><path d=\\\"M18 46v8M40 46v8M46 34l8-6v14z\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\"/><path d=\\\"M12 30l-4-8 8 4M46 30l4-8-8 4\\\" stroke=\\\"#111\\\" stroke-width=\\\"3.5\\\" fill=\\\"none\\\" stroke-linejoin=\\\"round\\\"/>',\\n barn:'<path d=\\\"M8 48V26L32 10l24 16v22z\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" stroke-linejoin=\\\"round\\\"/><path d=\\\"M8 48h48M22 48V34h20v14\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\"/>',\\n bike:'<circle cx=\\\"16\\\" cy=\\\"42\\\" r=\\\"9\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\"/><circle cx=\\\"48\\\" cy=\\\"42\\\" r=\\\"9\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\"/><path d=\\\"M16 42l10-16h12l10 16M26 26h-8M38 26l6 8\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\"/>',\\n slope:'<path d=\\\"M6 52L34 14l6 10 6-6 12 34z\\\" fill=\\\"none\\\" stroke=\\\"#111\\\" stroke-width=\\\"4\\\" stroke-linejoin=\\\"round\\\"/><circle cx=\\\"44\\\" cy=\\\"16\\\" r=\\\"4\\\" fill=\\\"#111\\\"/><circle cx=\\\"52\\\" cy=\\\"26\\\" r=\\\"3\\\" fill=\\\"#111\\\"/>',\\n person:'<circle cx=\\\"32\\\" cy=\\\"14\\\" r=\\\"7\\\" fill=\\\"#111\\\"/><path d=\\\"M32 22v20M32 42l-8 14M32 42l8 14M20 30h24\\\" stroke=\\\"#111\\\" stroke-width=\\\"4.5\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\"/>',\\n arrow:'<path d=\\\"M4 13h16M14 6l7 7-7 7\\\" stroke=\\\"#fff\\\" stroke-width=\\\"3.5\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\"/>'\\n};\\nfunction pc(k){return '<svg viewBox=\\\"0 0 64 64\\\">'+P[k]+'</svg>';}\\nfunction pcNo(k){return '<svg viewBox=\\\"0 0 64 64\\\">'+P[k]+'<circle cx=\\\"32\\\" cy=\\\"32\\\" r=\\\"27\\\" fill=\\\"none\\\" stroke=\\\"#D32F2F\\\" stroke-width=\\\"6\\\"/><path d=\\\"M13 13l38 38\\\" stroke=\\\"#D32F2F\\\" stroke-width=\\\"6\\\" stroke-linecap=\\\"round\\\"/></svg>';}\\n/* 3 khung: ĐANG Ở ĐÂU -> LÀM GÌ -> ĐI ĐÂU. Khung có gạch chéo đỏ = CẤM. */\\nvar ACT={\\n flood:     [['house',0],['run',0],['hill',0]],\\n landslide: [['slope',0],['run',0],['hill',0]],\\n frost:     [['cow',0],['run',0],['barn',0]],\\n fog:       [['bike',1],['person',0],['house',0]]\\n};\\nfunction svg(n,cls){return '<svg viewBox=\\\"0 0 64 64\\\" class=\\\"'+(cls||'')+'\\\">'+(ICONS[n]||ICONS.cloud)+'</svg>';}\\nfunction wmoIcon(c){if(c==null)return 'cloud';if(c===0||c===1)return 'sun';if(c<=3)return 'cloud';\\n if(c===45||c===48)return 'fog';if(c>=51&&c<=67)return 'rain';if(c>=80&&c<=82)return 'rain';\\n if(c>=95)return 'storm';if(c>=71&&c<=77)return 'frost';return 'cloud';}\\nvar LVICON={SAFE:'check',ADVISORY:'warn',WARNING:'warn',CRITICAL:'bang'};\\nvar LVTEXT={SAFE:'AN TOÀN',ADVISORY:'CHÚ Ý',WARNING:'CẢNH BÁO',CRITICAL:'NGUY HIỂM'};\\nvar DOW=['CN','T2','T3','T4','T5','T6','T7'];\\nvar DOWFULL=['Chủ nhật','Thứ Hai','Thứ Ba','Thứ Tư','Thứ Năm','Thứ Sáu','Thứ Bảy'];\\nfunction fullDate(dstr){ if(!dstr)return ''; var d=new Date(dstr+'T12:00:00+07:00');\\n  return DOWFULL[d.getDay()]+', '+('0'+d.getDate()).slice(-2)+'/'+('0'+(d.getMonth()+1)).slice(-2)+'/'+d.getFullYear(); }\\n\\nfunction esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}\\nfunction b64d(s){s=String(s).replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';\\n return decodeURIComponent(Array.prototype.map.call(atob(s),function(c){\\n   return '%'+('00'+c.charCodeAt(0).toString(16)).slice(-2);}).join(''));}\\nfunction tag(t){var e=document.getElementById('swtag');e.textContent=t;e.className='on';\\n setTimeout(function(){e.className='';},3200);}\\n\\nvar qs=new URLSearchParams(location.search), app=document.getElementById('app'), speaking=false;\\nfunction speak(text,audioUrl){\\n  if(speaking)return; var b=document.getElementById('spk');\\n  if(b)b.classList.add('on'); speaking=true;\\n  var done=function(){speaking=false; if(b)b.classList.remove('on');};\\n  if(audioUrl){var a=new Audio(audioUrl);a.onended=done;a.onerror=function(){speak2(text,done);};a.play().catch(function(){speak2(text,done);});return;}\\n  speak2(text,done);\\n}\\nfunction speak2(text,done){\\n  if(!window.speechSynthesis){done();return;}\\n  window.speechSynthesis.cancel();\\n  var u=new SpeechSynthesisUtterance(text);u.lang='vi-VN';u.rate=.8;u.onend=done;u.onerror=done;\\n  window.speechSynthesis.speak(u);\\n}\\nfunction renderAlert(p){\\n  var lv=p.lv||'CRITICAL', sz=p.sz||[null,null];\\n  document.title=p.t||'Cảnh báo';\\n  document.querySelector('meta[name=theme-color]').setAttribute('content', lv==='CRITICAL'?'#D32F2F':'#F57C00');\\n  var seq=(ACT[p.rt]||ACT.flood);\\n  var picto='<div class=\\\"pgrid\\\">';\\n  seq.forEach(function(s,i){\\n    picto+='<div class=\\\"pcell\\\">'+(s[1]?pcNo(s[0]):pc(s[0]))+'</div>';\\n    if(i<seq.length-1)picto+='<div class=\\\"parrow\\\"><svg viewBox=\\\"0 0 26 26\\\"><path d=\\\"M2 13h16M13 6l7 7-7 7\\\" stroke=\\\"#9AA5B1\\\" stroke-width=\\\"3.5\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\"/></svg></div>';\\n  });\\n  picto+='</div>';\\n  var html='<div class=\\\"alert '+lv+'\\\">'\\n   +'<div class=\\\"ico\\\">'+svg(p.rt,'pulse')+'</div>'\\n   +'<h1>'+esc(p.t)+'</h1><div class=\\\"desc\\\">'+esc(p.d)+'</div>'\\n   +'<div class=\\\"picto\\\">'+picto+'<div class=\\\"act\\\">'+esc(p.a)+'</div></div>'\\n   +'<div class=\\\"row\\\"><button class=\\\"spk\\\" id=\\\"spk\\\" aria-label=\\\"Nghe\\\">'+svg('speaker')+'</button>'\\n   +'<div class=\\\"langs\\\"><button class=\\\"lang\\\" data-l=\\\"vi\\\">Tiếng Việt</button>'\\n   +'<button class=\\\"lang sel\\\" data-l=\\\"hmong\\\">Mông</button><button class=\\\"lang\\\" data-l=\\\"thai\\\">Thái</button></div></div>'\\n   +'<div class=\\\"map\\\"><svg viewBox=\\\"0 0 400 220\\\" preserveAspectRatio=\\\"xMidYMid slice\\\">'\\n   +'<rect width=\\\"400\\\" height=\\\"220\\\" fill=\\\"rgba(0,0,0,.12)\\\"/>'\\n   +'<g fill=\\\"none\\\" stroke=\\\"rgba(255,255,255,.22)\\\" stroke-width=\\\"2\\\">'\\n   +'<ellipse cx=\\\"300\\\" cy=\\\"66\\\" rx=\\\"95\\\" ry=\\\"50\\\"/><ellipse cx=\\\"300\\\" cy=\\\"66\\\" rx=\\\"70\\\" ry=\\\"36\\\"/>'\\n   +'<ellipse cx=\\\"300\\\" cy=\\\"66\\\" rx=\\\"45\\\" ry=\\\"23\\\"/><ellipse cx=\\\"300\\\" cy=\\\"66\\\" rx=\\\"22\\\" ry=\\\"11\\\"/>'\\n   +'<ellipse cx=\\\"66\\\" cy=\\\"182\\\" rx=\\\"78\\\" ry=\\\"40\\\"/></g>'\\n   +'<path d=\\\"M8 192 Q120 202 200 164 T392 144\\\" stroke=\\\"rgba(255,255,255,.3)\\\" stroke-width=\\\"9\\\" fill=\\\"none\\\"/>'\\n   +'<path d=\\\"M92 170 Q148 144 208 126 T288 78\\\" stroke=\\\"#fff\\\" stroke-width=\\\"4\\\" fill=\\\"none\\\" stroke-dasharray=\\\"10 8\\\"/>'\\n   +'<circle cx=\\\"92\\\" cy=\\\"170\\\" r=\\\"15\\\" fill=\\\"rgba(255,255,255,.28)\\\"><animate attributeName=\\\"r\\\" values=\\\"11;21;11\\\" dur=\\\"1.8s\\\" repeatCount=\\\"indefinite\\\"/></circle>'\\n   +'<circle cx=\\\"92\\\" cy=\\\"170\\\" r=\\\"7\\\" fill=\\\"#fff\\\"/>'\\n   +'<path d=\\\"M288 78 l0 -28 21 8 -21 8\\\" fill=\\\"#4CAF50\\\"/><circle cx=\\\"288\\\" cy=\\\"78\\\" r=\\\"8\\\" fill=\\\"#4CAF50\\\"/>'\\n   +'<text x=\\\"200\\\" y=\\\"24\\\" fill=\\\"#fff\\\" font-size=\\\"14\\\" font-weight=\\\"700\\\" text-anchor=\\\"middle\\\" id=\\\"dist\\\">'+esc(p.szn||'')+'</text>'\\n   +'</svg></div>'\\n   +'<div class=\\\"badge\\\">'+svg('plane')+' Xem được khi không có mạng</div>'\\n   +'<div class=\\\"ts\\\">Phát lúc '+new Date((p.ts||0)*1000).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})\\n   +' · '+esc(p.szn||'')+'</div></div>';\\n  app.innerHTML=html;\\n  var lang='hmong';\\n  var AUDIO={hmong:'',thai:''};  /* <-- URL mp3 thu sẵn; để trống -> đọc tiếng Việt bằng giọng máy */\\n  document.querySelectorAll('.lang').forEach(function(b){b.onclick=function(){\\n    document.querySelectorAll('.lang').forEach(function(x){x.classList.remove('sel');});\\n    b.classList.add('sel');lang=b.dataset.l;speak(script,AUDIO[lang]||'');};});\\n  var script=(p.t||'')+'. '+(p.d||'')+'. '+(p.a||'');\\n  document.getElementById('spk').onclick=function(){speak(script,AUDIO[lang]||'');};\\n  setTimeout(function(){speak(script,AUDIO[lang]||'');},600);   /* thử tự đọc; bị chặn thì đã có nút loa to */\\n  if(navigator.geolocation && sz[0]!=null){\\n    navigator.geolocation.getCurrentPosition(function(pos){\\n      var R=6371000,t=Math.PI/180;\\n      var dLa=(sz[0]-pos.coords.latitude)*t,dLo=(sz[1]-pos.coords.longitude)*t;\\n      var aa=Math.sin(dLa/2)*Math.sin(dLa/2)+Math.cos(pos.coords.latitude*t)*Math.cos(sz[0]*t)*Math.sin(dLo/2)*Math.sin(dLo/2);\\n      var d=Math.round(2*R*Math.atan2(Math.sqrt(aa),Math.sqrt(1-aa)));\\n      var el=document.getElementById('dist');\\n      if(el)el.textContent=(d>=1000?(d/1000).toFixed(1)+' km':d+' m')+' → '+(p.szn||'');\\n    },function(){},{timeout:4000});\\n  }\\n}\\n\\n/* ===== Icon thời tiết NHIỀU MÀU (port từ mẫu React, dựng bằng JS thuần) ===== */\\nfunction raySet(cx,cy,angles,r1,r2,w){var s='';angles.forEach(function(a){var rad=a*Math.PI/180;\\n  s+='<line x1=\\\"'+(cx+r1*Math.cos(rad)).toFixed(1)+'\\\" y1=\\\"'+(cy+r1*Math.sin(rad)).toFixed(1)\\n   +'\\\" x2=\\\"'+(cx+r2*Math.cos(rad)).toFixed(1)+'\\\" y2=\\\"'+(cy+r2*Math.sin(rad)).toFixed(1)\\n   +'\\\" stroke=\\\"#F59E0B\\\" stroke-width=\\\"'+w+'\\\" stroke-linecap=\\\"round\\\"/>';});return s;}\\nfunction drops(pts,color,w,len){var s='';pts.forEach(function(p){\\n  s+='<line x1=\\\"'+p[0]+'\\\" y1=\\\"'+p[1]+'\\\" x2=\\\"'+(p[0]-(len>10?5:4))+'\\\" y2=\\\"'+(p[1]+len)+'\\\" stroke=\\\"'+color+'\\\" stroke-width=\\\"'+w+'\\\" stroke-linecap=\\\"round\\\"/>';});return s;}\\nfunction weatherColorSVG(code,size){\\n  code = (code==null?3:code);\\n  var s='<svg width=\\\"'+size+'\\\" height=\\\"'+size+'\\\" viewBox=\\\"0 0 80 80\\\" fill=\\\"none\\\">';\\n  if(code>=71&&code<=77){ /* TUYẾT — kiểm tra trước để không lọt vào nhánh mưa */\\n    s+='<ellipse cx=\\\"40\\\" cy=\\\"30\\\" rx=\\\"20\\\" ry=\\\"12\\\" fill=\\\"#CBD5E1\\\"/><ellipse cx=\\\"27\\\" cy=\\\"34\\\" rx=\\\"14\\\" ry=\\\"10\\\" fill=\\\"#E2E8F0\\\"/>';\\n    [[28,52],[40,56],[52,52],[34,62],[46,62]].forEach(function(p){s+='<circle cx=\\\"'+p[0]+'\\\" cy=\\\"'+p[1]+'\\\" r=\\\"2.6\\\" fill=\\\"#BAE6FD\\\"/>';});\\n    return s+'</svg>';\\n  }\\n  if(code===0){ s+='<circle cx=\\\"40\\\" cy=\\\"40\\\" r=\\\"18\\\" fill=\\\"#FCD34D\\\"/>'+raySet(40,40,[0,45,90,135,180,225,270,315],24,32,4);\\n  }else if(code<=2){ s+='<circle cx=\\\"30\\\" cy=\\\"34\\\" r=\\\"13\\\" fill=\\\"#FCD34D\\\"/>'+raySet(30,34,[315,0,45,270,225],18,24,3.5)\\n    +'<ellipse cx=\\\"46\\\" cy=\\\"50\\\" rx=\\\"16\\\" ry=\\\"10\\\" fill=\\\"#94A3B8\\\"/><ellipse cx=\\\"36\\\" cy=\\\"52\\\" rx=\\\"12\\\" ry=\\\"9\\\" fill=\\\"#94A3B8\\\"/><ellipse cx=\\\"54\\\" cy=\\\"53\\\" rx=\\\"10\\\" ry=\\\"8\\\" fill=\\\"#CBD5E1\\\"/>';\\n  }else if(code<=3){ s+='<ellipse cx=\\\"42\\\" cy=\\\"40\\\" rx=\\\"20\\\" ry=\\\"13\\\" fill=\\\"#94A3B8\\\"/><ellipse cx=\\\"28\\\" cy=\\\"44\\\" rx=\\\"15\\\" ry=\\\"11\\\" fill=\\\"#94A3B8\\\"/><ellipse cx=\\\"54\\\" cy=\\\"45\\\" rx=\\\"13\\\" ry=\\\"10\\\" fill=\\\"#CBD5E1\\\"/><ellipse cx=\\\"40\\\" cy=\\\"48\\\" rx=\\\"22\\\" ry=\\\"10\\\" fill=\\\"#CBD5E1\\\"/>';\\n  }else if(code<=48){ s+='<ellipse cx=\\\"40\\\" cy=\\\"28\\\" rx=\\\"22\\\" ry=\\\"12\\\" fill=\\\"#CBD5E1\\\"/>';\\n    [38,48,58].forEach(function(y,i){s+='<rect x=\\\"14\\\" y=\\\"'+y+'\\\" width=\\\"'+(46-i*6)+'\\\" height=\\\"5\\\" rx=\\\"2.5\\\" fill=\\\"#94A3B8\\\" opacity=\\\"0.7\\\"/>';});\\n  }else if(code<=57){ s+='<ellipse cx=\\\"42\\\" cy=\\\"30\\\" rx=\\\"20\\\" ry=\\\"13\\\" fill=\\\"#64748B\\\"/><ellipse cx=\\\"28\\\" cy=\\\"34\\\" rx=\\\"15\\\" ry=\\\"11\\\" fill=\\\"#475569\\\"/><ellipse cx=\\\"54\\\" cy=\\\"35\\\" rx=\\\"13\\\" ry=\\\"10\\\" fill=\\\"#64748B\\\"/>'\\n    +drops([[28,54],[40,58],[52,54],[34,62],[46,62]],'#93C5FD',2.5,9);\\n  }else if(code<=67){ s+='<ellipse cx=\\\"42\\\" cy=\\\"26\\\" rx=\\\"20\\\" ry=\\\"13\\\" fill=\\\"#475569\\\"/><ellipse cx=\\\"27\\\" cy=\\\"31\\\" rx=\\\"15\\\" ry=\\\"11\\\" fill=\\\"#334155\\\"/><ellipse cx=\\\"55\\\" cy=\\\"32\\\" rx=\\\"13\\\" ry=\\\"10\\\" fill=\\\"#475569\\\"/>'\\n    +drops([[24,50],[34,54],[44,50],[54,54],[29,62],[39,58],[49,62],[59,58]],'#3B82F6',2.8,11);\\n  }else if(code<=82){ s+='<ellipse cx=\\\"40\\\" cy=\\\"24\\\" rx=\\\"18\\\" ry=\\\"11\\\" fill=\\\"#475569\\\"/><ellipse cx=\\\"27\\\" cy=\\\"29\\\" rx=\\\"14\\\" ry=\\\"10\\\" fill=\\\"#334155\\\"/><ellipse cx=\\\"53\\\" cy=\\\"29\\\" rx=\\\"12\\\" ry=\\\"9\\\" fill=\\\"#475569\\\"/>'\\n    +drops([[22,48],[34,52],[46,48],[58,52],[28,60],[40,56],[52,60]],'#60A5FA',3,12);\\n  }else{ s+='<ellipse cx=\\\"40\\\" cy=\\\"22\\\" rx=\\\"20\\\" ry=\\\"12\\\" fill=\\\"#1E293B\\\"/><ellipse cx=\\\"26\\\" cy=\\\"27\\\" rx=\\\"15\\\" ry=\\\"10\\\" fill=\\\"#0F172A\\\"/><ellipse cx=\\\"54\\\" cy=\\\"27\\\" rx=\\\"13\\\" ry=\\\"9\\\" fill=\\\"#1E293B\\\"/>'\\n    +drops([[24,44],[34,48],[54,44],[64,48]],'#93C5FD',2.5,12)\\n    +'<polygon points=\\\"43,40 36,55 41,55 38,70 52,50 45,50 50,40\\\" fill=\\\"#FDE047\\\"/>';\\n  }\\n  return s+'</svg>';\\n}\\n/* Icon cảnh báo THEO HÌNH DẠNG — vẫn phân biệt được khi in đen trắng / người mù màu */\\nfunction alertShapeSVG(level,size,color){\\n  var s='<svg width=\\\"'+size+'\\\" height=\\\"'+size+'\\\" viewBox=\\\"0 0 24 24\\\" fill=\\\"none\\\">';\\n  if(level==='SAFE') s+='<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"10\\\" fill=\\\"'+color+'\\\"/><polyline points=\\\"7,12 10.5,15.5 17,9\\\" stroke=\\\"#fff\\\" stroke-width=\\\"2.5\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\" fill=\\\"none\\\"/>';\\n  else if(level==='ADVISORY') s+='<polygon points=\\\"12,3 22,21 2,21\\\" fill=\\\"'+color+'\\\"/><text x=\\\"12\\\" y=\\\"19\\\" text-anchor=\\\"middle\\\" font-size=\\\"11\\\" font-weight=\\\"900\\\" fill=\\\"#fff\\\">!</text>';\\n  else if(level==='WARNING') s+='<polygon points=\\\"9,2 15,2 22,9 22,15 15,22 9,22 2,15 2,9\\\" fill=\\\"'+color+'\\\"/><text x=\\\"12\\\" y=\\\"17\\\" text-anchor=\\\"middle\\\" font-size=\\\"11\\\" font-weight=\\\"900\\\" fill=\\\"#fff\\\">!</text>';\\n  else s+='<polygon points=\\\"12,1 14.5,9.5 23,9.5 16,14.5 18.5,23 12,18 5.5,23 8,14.5 1,9.5 9.5,9.5\\\" fill=\\\"'+color+'\\\"/><line x1=\\\"9\\\" y1=\\\"9\\\" x2=\\\"15\\\" y2=\\\"15\\\" stroke=\\\"#fff\\\" stroke-width=\\\"2\\\" stroke-linecap=\\\"round\\\"/><line x1=\\\"15\\\" y1=\\\"9\\\" x2=\\\"9\\\" y2=\\\"15\\\" stroke=\\\"#fff\\\" stroke-width=\\\"2\\\" stroke-linecap=\\\"round\\\"/>';\\n  return s+'</svg>';\\n}\\nvar LVSOLID={SAFE:'#16a34a',ADVISORY:'#d97706',WARNING:'#ea580c',CRITICAL:'#dc2626'};\\nvar LVCHIP={SAFE:'#dcfce7',ADVISORY:'#fef9c3',WARNING:'#ffedd5',CRITICAL:'#fee2e2'};\\nvar LVCHIPTX={SAFE:'#14532d',ADVISORY:'#78350f',WARNING:'#7c2d12',CRITICAL:'#7f1d1d'};\\nvar HEROLINE={SAFE:'HÔM NAY AN TOÀN',ADVISORY:'HÔM NAY CẦN CHÚ Ý',WARNING:'HÔM NAY CÓ CẢNH BÁO',CRITICAL:'HÔM NAY NGUY HIỂM'};\\n\\nfunction renderForecast(data,pick){\\n  if(!data.locations||!data.locations.length){app.innerHTML='<div class=\\\"load\\\">'+esc(data.message||'Chua co du lieu.')+'</div>';return;}\\n  var idx=0; if(pick){data.locations.forEach(function(l,n){if(l.id===pick)idx=n;});}\\n  var view='day'; // 'day' = 7 ngày | 'hour' = 24 giờ\\n\\n  function hourLabel(t){ var d=new Date(t); var h=d.getHours(); return (h<10?'0':'')+h+'h'; }\\n  function partOfDay(t){ var h=new Date(t).getHours();\\n    if(h<6)return 'Đêm'; if(h<11)return 'Sáng'; if(h<14)return 'Trưa'; if(h<18)return 'Chiều'; return 'Tối'; }\\n\\n  function draw(){\\n    var L=data.locations[idx], d=L.daily||{}, hr=L.hourly||{}, lv=L.alert_level||'SAFE';\\n    var t0=(d.t_max||[])[0], wc=(d.weather_code||[])[0], solid=LVSOLID[lv];\\n    var when=data.generated_at?new Date(data.generated_at).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'}):'--:--';\\n    var m=(L.metrics||{}), cov=(data.coverage||{});\\n\\n    var h='<div class=\\\"fcw\\\">';\\n    // ===== Thanh chọn xã (chuyển qua lại) =====\\n    h+='<div class=\\\"xbar\\\"><div class=\\\"xrow\\\">';\\n    data.locations.forEach(function(l,k){\\n      var lc=LVSOLID[l.alert_level||'SAFE'];\\n      h+='<button class=\\\"xchip'+(k===idx?' on':'')+'\\\" data-k=\\\"'+k+'\\\">'\\n        +'<span class=\\\"xdot\\\" style=\\\"background:'+lc+'\\\"></span>'\\n        +esc(String(l.name).replace(/^(Xã|Phường) /,'').replace(/\\\\s*\\\\(.*\\\\)$/,''))+'</button>';\\n    });\\n    h+='</div></div>';\\n\\n    // ===== HERO (Apple Weather style) =====\\n    h+='<div class=\\\"hero3\\\" style=\\\"background:linear-gradient(160deg,'+solid+' 0%,'+shade(solid)+' 100%)\\\">'\\n      +'<div class=\\\"h3top\\\">'+esc(String(L.name).replace(/^(Xã|Phường) /,''))+'</div>'\\n      +'<div class=\\\"h3date\\\">'+fullDate((d.time||[])[0])+'</div>'\\n      +'<div class=\\\"h3ico\\\">'+weatherColorSVG(wc,120)+'</div>'\\n      +'<div class=\\\"h3temp\\\">'+(t0!=null?Math.round(t0):'--')+'<span>°</span></div>'\\n      +'<div class=\\\"h3stat\\\">'+esc(HEROLINE[lv])+'</div>'\\n      +'<div class=\\\"h3sub\\\">'+esc(wmoText(wc))\\n        +(m.forecast_next24_mm!=null?' · mưa '+Math.round(m.forecast_next24_mm)+'mm':'')+'</div>'\\n      +'</div>';\\n\\n    // ===== Thang 4 cấp =====\\n    h+='<div class=\\\"scale2\\\">';\\n    ['SAFE','ADVISORY','WARNING','CRITICAL'].forEach(function(x){\\n      var on=x===lv;\\n      h+='<div class=\\\"lv2'+(on?' on':'')+'\\\" style=\\\"'+(on?'background:'+LVSOLID[x]+';box-shadow:0 4px 16px '+LVSOLID[x]+'66;border-color:'+LVSOLID[x]:'background:'+LVCHIP[x])+'\\\">'\\n        +alertShapeSVG(x,on?24:20,on?'#fff':LVSOLID[x])\\n        +'<span style=\\\"color:'+(on?'#fff':LVCHIPTX[x])+'\\\">'+({SAFE:'AN TOÀN',ADVISORY:'CHÚ Ý',WARNING:'CẢNH BÁO',CRITICAL:'NGUY HIỂM'}[x])+'</span></div>';\\n    });\\n    h+='</div>';\\n\\n    // ===== Tab chuyển Ngày / Giờ =====\\n    var hasHour = hr.time && hr.time.length;\\n    h+='<div class=\\\"tabs\\\"><button class=\\\"tab'+(view==='day'?' on':'')+'\\\" data-v=\\\"day\\\">7 NGÀY TỚI</button>';\\n    if(hasHour) h+='<button class=\\\"tab'+(view==='hour'?' on':'')+'\\\" data-v=\\\"hour\\\">24 GIỜ TỚI</button>';\\n    h+='</div>';\\n\\n    if(view==='hour' && hasHour){\\n      // ===== 24 giờ =====\\n      h+='<div class=\\\"hourwrap\\\"><div class=\\\"hourrow\\\">';\\n      var th=((data.diagnostics||{}).thresholds_by_location||{})[L.id]||{};\\n      (hr.time||[]).slice(0,24).forEach(function(t,k){\\n        var pc=(hr.precip||[])[k], wcd=(hr.wcode||[])[k];\\n        var big=(k===0);\\n        h+='<div class=\\\"hcell'+(big?' now':'')+'\\\">'\\n          +'<span class=\\\"hlb\\\">'+(big?'Bây giờ':hourLabel(t))+'</span>'\\n          +'<span class=\\\"hpart\\\">'+partOfDay(t)+'</span>'\\n          +weatherColorSVG(wcd,34)\\n          +'<span class=\\\"hpc\\\">'+(pc!=null?(Math.round(pc*10)/10+'mm'):'—')+'</span></div>';\\n      });\\n      h+='</div></div>';\\n    } else {\\n      // ===== 7 ngày =====\\n      h+='<div class=\\\"days2wrap\\\"><div class=\\\"days2\\\">';\\n      var th=((data.diagnostics||{}).thresholds_by_location||{})[L.id]||{};\\n      (d.time||[]).slice(0,7).forEach(function(dt,k){\\n        var mx=(d.t_max||[])[k],mn=(d.t_min||[])[k],c=(d.weather_code||[])[k],ps=(d.precip_sum||[])[k]||0;\\n        var r='SAFE';\\n        if(ps>(th.rain_critical_mm||50))r='CRITICAL';else if(ps>(th.rain_warning_mm||30))r='WARNING';\\n        else if(ps>(th.rain_advisory_mm||15))r='ADVISORY';\\n        if(mn!=null&&mn<4)r=(mn<0?'CRITICAL':'WARNING');\\n        var today=k===0;\\n        h+='<div class=\\\"day2\\\" style=\\\"'+(today?'background:'+LVCHIP[r]+';border-color:'+LVSOLID[r]+'55':'background:#fff;border-color:#eef1f4')+'\\\">'\\n          +'<span class=\\\"d2n\\\">'+(today?'Hôm nay':['CN','T2','T3','T4','T5','T6','T7'][new Date(dt).getDay()])+'</span>'\\n          +'<span class=\\\"d2d\\\">'+dt.slice(8,10)+'/'+dt.slice(5,7)+'</span>'\\n          +weatherColorSVG(c,38)\\n          +(ps>0?'<span class=\\\"d2p\\\">'+Math.round(ps)+'mm</span>':'<span class=\\\"d2p\\\" style=\\\"opacity:.4\\\">—</span>')\\n          +'<span class=\\\"d2t\\\">'+(mx!=null?Math.round(mx):'--')+'°<small>'+(mn!=null?Math.round(mn):'--')+'°</small></span>'\\n          +'<span class=\\\"d2bar\\\" style=\\\"background:'+LVSOLID[r]+'\\\"></span></div>';\\n      });\\n      h+='</div></div>';\\n    }\\n\\n    // ===== Footer =====\\n    h+='<div class=\\\"foot2\\\"><div class=\\\"frow\\\">'+svg('plane','')+' Cập nhật '+when\\n      +(m.n_points>1?' · '+m.n_points+' điểm đo':'')+'</div>'\\n      +'<div class=\\\"fchip\\\"><svg width=\\\"15\\\" height=\\\"15\\\" viewBox=\\\"0 0 24 24\\\"><circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"10\\\" fill=\\\"#16a34a\\\"/><polyline points=\\\"7,12 10.5,15.5 17,9\\\" stroke=\\\"#fff\\\" stroke-width=\\\"2.5\\\" fill=\\\"none\\\" stroke-linecap=\\\"round\\\" stroke-linejoin=\\\"round\\\"/></svg>'\\n      +(cov.communes?cov.communes+' xã toàn tỉnh':'Dữ liệu thật')+'</div></div>';\\n\\n    h+='</div>';\\n    app.innerHTML=h;\\n\\n    document.querySelectorAll('.xchip').forEach(function(b){b.onclick=function(){idx=+b.dataset.k;draw();\\n      var el=document.querySelector('.xchip.on'); if(el&&el.scrollIntoView)el.scrollIntoView({inline:'center',block:'nearest'});};});\\n    document.querySelectorAll('.tab').forEach(function(b){b.onclick=function(){view=b.dataset.v;draw();};});\\n  }\\n  draw();\\n}\\n// làm tối màu cho gradient hero\\nfunction shade(hex){\\n  var c=hex.replace('#',''); var r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16);\\n  r=Math.round(r*0.72);g=Math.round(g*0.72);b=Math.round(b*0.72);\\n  return '#'+[r,g,b].map(function(x){return ('0'+x.toString(16)).slice(-2);}).join('');\\n}\\nfunction wmoText(c){ return {0:'Trời quang',1:'Ít mây',2:'Có mây',3:'Nhiều mây',45:'Sương mù',48:'Sương mù',\\n  51:'Mưa phùn',53:'Mưa phùn',55:'Mưa phùn nặng',61:'Mưa nhỏ',63:'Mưa',65:'Mưa to',\\n  71:'Có tuyết',73:'Tuyết',80:'Mưa rào',81:'Mưa rào',82:'Mưa rào to',95:'Dông',96:'Dông, mưa đá'}[c]||'Thay đổi'; }\\n/* Service Worker: cache vỏ trang -> lần sau mở link vẫn render KHI MẤT MẠNG */\\ntry {\\n  if ('serviceWorker' in navigator && navigator.serviceWorker) {\\n    navigator.serviceWorker.register('./aether-sw',{scope:'./'})\\n      .then(function(){tag('✓ Đã lưu để xem offline');})\\n      .catch(function(e){/* SW không bắt buộc */});\\n  }\\n} catch(e) { /* SW bị sandbox chặn khi xem qua n8n webhook — bỏ qua, trang vẫn chạy bình thường */ }\\n(function(){\\n  var raw=qs.get('data');\\n  if(raw){try{renderAlert(JSON.parse(b64d(raw)));return;}catch(e){app.innerHTML='<div class=\\\"load\\\">Link cảnh báo không hợp lệ.</div>';return;}}\\n  fetch('./aether-forecast',{cache:'no-store'}).then(function(r){return r.json();})\\n    .then(function(d){renderForecast(d,qs.get('x'));})\\n    .catch(function(){app.innerHTML='<div class=\\\"load\\\">Không có mạng và chưa có dữ liệu đã lưu.</div>';});\\n})();\\n</script></body></html>\";\nreturn [{ json: { html } }];"
+      },
+      "id": "e5956cf1-781f-4218-9d51-c0dbacc01d7a",
+      "name": "Render Webview",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        1744
+      ],
+      "notes": "Pictogram 3 khung cho người mù chữ: ĐANG Ở ĐÂU -> LÀM GÌ -> ĐI ĐÂU. Gạch chéo đỏ = CẤM. Tự đọc khi mở. Đăng ký Service Worker để chạy offline."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "1d3955fa-5fb9-4498-b8fa-4476fdd0ec43",
+      "name": "Respond Webview",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        1744
+      ]
+    },
+    {
+      "parameters": {
+        "path": "aether-sw",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "7ebf13f3-da63-4812-8064-5355a9e1a48b",
+      "name": "Webhook /sw",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1920
+      ],
+      "webhookId": "0ecd43d8-558c-4b03-b44c-61fe25c4cf61"
+    },
+    {
+      "parameters": {
+        "jsCode": "const html = \"/* Aether-DB Service Worker — phục vụ webview KHI MẤT MẠNG.\\n   Phải được trả về với header:  Content-Type: application/javascript\\n                                 Service-Worker-Allowed: /webhook/\\n   Scope = /webhook/ vì script nằm ở /webhook/aether-sw. */\\nvar CACHE = 'aether-db-v3';\\nvar SHELL = './aether-view';\\n\\nself.addEventListener('install', function(e){\\n  self.skipWaiting();\\n  e.waitUntil(caches.open(CACHE).then(function(c){\\n    // Cache vỏ trang. Payload cảnh báo nằm TRONG url (?data=) nên không cần mạng để render.\\n    return c.add(new Request(SHELL, { cache: 'reload' })).catch(function(){});\\n  }));\\n});\\n\\nself.addEventListener('activate', function(e){\\n  e.waitUntil(caches.keys().then(function(ks){\\n    return Promise.all(ks.filter(function(k){ return k!==CACHE; }).map(function(k){ return caches.delete(k); }));\\n  }).then(function(){ return self.clients.claim(); }));\\n});\\n\\nself.addEventListener('fetch', function(e){\\n  var url = new URL(e.request.url);\\n  if (e.request.method !== 'GET') return;\\n\\n  // 1. Trang cảnh báo: LUÔN trả vỏ đã cache, bỏ qua query string (?data=... luôn khác nhau)\\n  if (url.pathname.indexOf('/aether-view') >= 0) {\\n    e.respondWith(\\n      caches.match(SHELL, { ignoreSearch: true }).then(function(hit){\\n        if (hit) {\\n          // Có mạng thì âm thầm làm mới vỏ cho lần sau\\n          fetch(e.request).then(function(r){\\n            if (r && r.ok) caches.open(CACHE).then(function(c){ c.put(SHELL, r.clone()); });\\n          }).catch(function(){});\\n          return hit;\\n        }\\n        return fetch(e.request);\\n      })\\n    );\\n    return;\\n  }\\n\\n  // 2. API dự báo: mạng trước, hết mạng thì lấy bản lưu gần nhất (dữ liệu cũ còn hơn màn hình trắng)\\n  if (url.pathname.indexOf('/aether-forecast') >= 0) {\\n    e.respondWith(\\n      fetch(e.request).then(function(r){\\n        if (r && r.ok) { var cl = r.clone(); caches.open(CACHE).then(function(c){ c.put(e.request, cl); }); }\\n        return r;\\n      }).catch(function(){ return caches.match(e.request); })\\n    );\\n    return;\\n  }\\n\\n  // 3. Tài nguyên khác (mp3 tiếng Mông/Thái, icon): cache trước\\n  e.respondWith(caches.match(e.request).then(function(hit){\\n    return hit || fetch(e.request).then(function(r){\\n      if (r && r.ok && r.type === 'basic') { var cl = r.clone(); caches.open(CACHE).then(function(c){ c.put(e.request, cl); }); }\\n      return r;\\n    }).catch(function(){ return hit; });\\n  }));\\n});\\n\";\nreturn [{ json: { html } }];"
+      },
+      "id": "5b4cdbe2-d575-438c-bff7-77367662097a",
+      "name": "Render Service Worker",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        1920
+      ],
+      "notes": "⭐ SW cache vỏ trang -> mở link khi MẤT MẠNG vẫn render. Payload nằm trong ?data= nên không cần gọi API."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/javascript; charset=utf-8"
+              },
+              {
+                "name": "Service-Worker-Allowed",
+                "value": "/webhook/"
+              }
+            ]
+          }
+        }
+      },
+      "id": "821d4f74-8ab1-4f23-81ba-0028e12525b8",
+      "name": "Respond SW",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        1920
+      ],
+      "notes": "Header Service-Worker-Allowed BẮT BUỘC — không có thì scope SW bị giới hạn và offline không chạy."
+    },
+    {
+      "parameters": {
+        "path": "aether-loa",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "fbe1fb62-9523-4b11-9388-fe278738d416",
+      "name": "Webhook /loa",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2112
+      ],
+      "webhookId": "5c431e81-e794-441e-bdcd-161b335e1d74"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Trạm loa gọi kèm ?x=<xa_id>.\n// KHÔNG dựa vào static data riêng (không persist qua execution) — TỰ SINH bản tin\n// từ latestForecast (nguồn mà /aether-forecast đã đọc được ổn định).\nconst xa = ($json.query && $json.query.x) ? String($json.query.x) : null;\nconst sd = (function(){ try { return $getWorkflowStaticData('global'); } catch(e){ return {}; } })();\n\n// 1) Ưu tiên CẢNH BÁO khẩn nếu có\nconst alert = sd.latestLoa || null;\nif (alert && alert.ts && (!xa || alert.loc === xa)) {\n  const o = Object.assign({}, alert); o.kind='canh_bao';\n  return [{ json: o }];\n}\n\n// 2) Bản tin sáng: tự dựng từ latestForecast\nconst fc = sd.latestForecast || null;\nif (!fc || !fc.locations || !xa) {\n  return [{ json: { ts:0, idle:true, note:'Chua co du lieu du bao. Chay pipeline chinh truoc.' } }];\n}\nconst L = fc.locations.filter(function(x){ return x.id===xa; })[0];\nif (!L) return [{ json: { ts:0, idle:true, note:'Khong tim thay xa '+xa } }];\n\nconst d = L.daily || {};\nconst WMO = {0:'trời quang',1:'ít mây',2:'có mây',3:'nhiều mây',45:'sương mù',48:'sương mù',\n  51:'mưa phùn',53:'mưa phùn',55:'mưa phùn nặng hạt',61:'mưa nhỏ',63:'mưa',65:'mưa to',\n  71:'có tuyết',73:'có tuyết',80:'mưa rào',81:'mưa rào',82:'mưa rào to',95:'dông',96:'dông, mưa đá'};\nconst troi = WMO[(d.weather_code||[])[0]] || 'thay đổi';\nconst thap = (d.t_min||[])[0], cao = (d.t_max||[])[0];\nconst mm = (d.precip_sum||[])[0];\nconst sn = String(L.name||xa).replace(/^(Xã|Phường) /,'');\n\nvar mua = '';\nif (mm!=null){ if(mm<1)mua='hầu như không mưa'; else if(mm<16)mua='có mưa nhỏ';\n  else if(mm<30)mua='có mưa'; else if(mm<50)mua='có mưa to'; else mua='có mưa rất to, đề phòng lũ'; }\nvar nhiet = (thap!=null&&cao!=null) ? ('nhiệt độ từ '+Math.round(thap)+' đến '+Math.round(cao)+' độ') : '';\n\nvar cb = '';\nif (L.alert_level && L.alert_level!=='SAFE'){\n  var ten = {flood:'lũ quét',landslide:'sạt lở đất',frost:'rét hại',fog:'sương mù dày'}[L.risk_type]||'thời tiết nguy hiểm';\n  cb = ' Đặc biệt chú ý, hôm nay có nguy cơ '+ten+', bà con hết sức cẩn thận.';\n}\n\nconst script = 'Bà con '+sn+' chú ý. Bản tin thời tiết sáng nay. Hôm nay trời '+troi+', '\n  + [mua,nhiet].filter(Boolean).join(', ') + '.' + cb\n  + ' Bà con nhớ xem thời tiết trước khi đi làm. Xin cảm ơn.';\n\nreturn [{ json: {\n  ts: Math.floor(new Date(fc.generated_at||Date.now()).getTime()/1000),\n  loc: xa, name: L.name, lv: L.alert_level||'SAFE',\n  title: 'Bản tin sáng '+sn, loa_script: script, audio_url:'', kind:'ban_tin_sang'\n} }];"
+      },
+      "id": "02a38762-ec29-4db0-9534-dc0e7dfe3dbe",
+      "name": "Đọc trạng thái loa",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        2112
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "fd3bc6a6-18fa-4fe7-b6ae-5a6521b671cf",
+      "name": "Respond Loa",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        2112
+      ]
+    },
+    {
+      "parameters": {
+        "path": "aether-loa-client",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "09e134f2-dee9-4591-9395-a534bacae48b",
+      "name": "Webhook /loa-client",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2288
+      ],
+      "webhookId": "40fb2d78-364c-4501-ae2c-15a07a817dfa"
+    },
+    {
+      "parameters": {
+        "jsCode": "const html = \"<!DOCTYPE html>\\n<html lang=\\\"vi\\\"><head>\\n<meta charset=\\\"utf-8\\\"><meta name=\\\"viewport\\\" content=\\\"width=device-width,initial-scale=1,viewport-fit=cover\\\">\\n<meta name=\\\"theme-color\\\" content=\\\"#2563eb\\\">\\n<title>Loa bản — Aether-DB</title>\\n<style>\\n*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}\\nbody{font-family:system-ui,-apple-system,\\\"Segoe UI\\\",Roboto,sans-serif;background:#f2f4f7;color:#111827;min-height:100vh}\\n.wrap{max-width:440px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column}\\n.top{background:#fff;padding:18px 20px 16px;box-shadow:0 1px 0 #e8ebee;display:flex;align-items:center;gap:12px}\\n.spk{width:44px;height:44px;border-radius:13px;background:#2563eb;display:flex;align-items:center;justify-content:center;flex-shrink:0}\\n.spk svg{width:24px;height:24px}\\n.tt{flex:1}\\n.tt h1{font-size:16px;font-weight:800;letter-spacing:.2px}\\n.tt p{font-size:12.5px;color:#8a96a3;font-weight:500;margin-top:1px}\\n.clk{font-size:13px;font-weight:700;color:#8a96a3;font-variant-numeric:tabular-nums}\\n.body{flex:1;padding:16px;display:flex;flex-direction:column;gap:14px}\\n/* nút kích hoạt lớn, thân thiện */\\n.arm{width:100%;border:none;border-radius:20px;padding:26px 20px;font-size:19px;font-weight:800;letter-spacing:.3px;\\n  cursor:pointer;background:#fff;color:#2563eb;border:2.5px dashed #93b4f5;transition:.2s;display:flex;flex-direction:column;align-items:center;gap:8px}\\n.arm svg{width:38px;height:38px}\\n.arm.on{background:#2563eb;color:#fff;border-style:solid;border-color:#2563eb;box-shadow:0 8px 24px rgba(37,99,235,.35)}\\n.arm small{font-size:13px;font-weight:600;opacity:.85}\\n.status{display:flex;align-items:center;gap:9px;justify-content:center;font-size:13.5px;font-weight:600;color:#8a96a3}\\n.led{width:11px;height:11px;border-radius:50%;background:#cbd5e1}\\n.led.ok{background:#22c55e;box-shadow:0 0 0 4px #22c55e22}\\n.led.live{background:#2563eb;box-shadow:0 0 0 4px #2563eb22;animation:bp 1s infinite}\\n@keyframes bp{50%{opacity:.5}}\\n/* thẻ bản tin đang phát — style giống hero dự báo */\\n.card{border-radius:22px;padding:20px;background:#fff;box-shadow:0 3px 14px rgba(0,0,0,.06)}\\n.card.idle{text-align:center;padding:40px 22px}\\n.card.idle .em{font-size:44px;margin-bottom:10px}\\n.card.idle h2{font-size:17px;font-weight:800;color:#374151;margin-bottom:6px}\\n.card.idle p{font-size:14px;color:#8a96a3;font-weight:500;line-height:1.5}\\n.card.live{background:linear-gradient(160deg,#2563eb,#1a4fc4);color:#fff}\\n.card.live.warn{background:linear-gradient(160deg,#f59e0b,#d97706)}\\n.card.live.crit{background:linear-gradient(160deg,#ef4444,#dc2626)}\\n.badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:800;letter-spacing:.5px;\\n  background:rgba(255,255,255,.22);padding:6px 12px;border-radius:999px;margin-bottom:12px}\\n.card.live h2{font-size:20px;font-weight:800;margin-bottom:4px;line-height:1.15}\\n.card.live .loc{font-size:14px;font-weight:600;opacity:.9;margin-bottom:14px}\\n.script{font-size:16px;line-height:1.6;font-weight:500}\\n.btns{display:flex;gap:10px}\\n.btn{flex:1;border:none;border-radius:15px;padding:15px;font-size:15px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px}\\n.btn svg{width:18px;height:18px}\\n.btn.play{background:#22c55e;color:#fff}\\n.btn.stop{background:#eef1f4;color:#5a6672}\\n.hint{font-size:12px;color:#9aa5b1;text-align:center;line-height:1.5;padding:0 8px}\\n.log{background:#fff;border-radius:18px;padding:14px 16px;max-height:200px;overflow-y:auto}\\n.log h3{font-size:11px;font-weight:800;letter-spacing:1px;color:#9aa5b1;margin-bottom:10px}\\n.log div{font-size:12.5px;color:#5a6672;padding:5px 0;border-bottom:1px solid #f2f4f7;font-variant-numeric:tabular-nums}\\n.log div.a{color:#dc2626;font-weight:700}\\n</style></head>\\n<body><div class=\\\"wrap\\\">\\n<div class=\\\"top\\\">\\n  <div class=\\\"spk\\\"><svg viewBox=\\\"0 0 24 24\\\" fill=\\\"none\\\"><path d=\\\"M4 9v6h4l5 5V4L8 9H4z\\\" fill=\\\"#fff\\\"/><path d=\\\"M16 8a5 5 0 010 8M18.5 5.5a9 9 0 010 13\\\" stroke=\\\"#fff\\\" stroke-width=\\\"2\\\" stroke-linecap=\\\"round\\\"/></svg></div>\\n  <div class=\\\"tt\\\"><h1>Loa bản</h1><p>Trạm truyền thanh Aether-DB</p></div>\\n  <div class=\\\"clk\\\" id=\\\"clk\\\">--:--:--</div>\\n</div>\\n<div class=\\\"body\\\">\\n  <button class=\\\"arm\\\" id=\\\"arm\\\">\\n    <svg viewBox=\\\"0 0 24 24\\\" fill=\\\"none\\\"><circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"10\\\" stroke=\\\"currentColor\\\" stroke-width=\\\"2\\\"/><path d=\\\"M10 8l6 4-6 4V8z\\\" fill=\\\"currentColor\\\"/></svg>\\n    BẬT LOA\\n    <small>Chạm một lần để loa bắt đầu đọc tin</small>\\n  </button>\\n  <div class=\\\"status\\\"><span class=\\\"led\\\" id=\\\"led\\\"></span><span id=\\\"stx\\\">Chưa bật loa</span></div>\\n\\n  <div class=\\\"card idle\\\" id=\\\"card\\\">\\n    <div class=\\\"em\\\">📻</div>\\n    <h2 id=\\\"ttl\\\">Đang chờ bản tin</h2>\\n    <p id=\\\"scr\\\">Bật loa xong, trạm sẽ tự đọc bản tin thời tiết sáng nay. Khi có nguy hiểm, loa đọc cảnh báo 3 lần.</p>\\n  </div>\\n\\n  <div class=\\\"btns\\\">\\n    <button class=\\\"btn play\\\" id=\\\"test\\\"><svg viewBox=\\\"0 0 24 24\\\" fill=\\\"none\\\"><path d=\\\"M8 5v14l11-7L8 5z\\\" fill=\\\"currentColor\\\"/></svg>Nghe thử</button>\\n    <button class=\\\"btn stop\\\" id=\\\"stop\\\"><svg viewBox=\\\"0 0 24 24\\\" fill=\\\"none\\\"><rect x=\\\"6\\\" y=\\\"6\\\" width=\\\"12\\\" height=\\\"12\\\" rx=\\\"2\\\" fill=\\\"currentColor\\\"/></svg>Dừng</button>\\n  </div>\\n  <div class=\\\"hint\\\" id=\\\"voice\\\">Đang kiểm tra giọng đọc…</div>\\n\\n  <div class=\\\"log\\\"><h3>NHẬT KÝ TRẠM</h3><div id=\\\"log\\\"></div></div>\\n</div>\\n</div>\\n<script>\\nvar armed=false,lastTs=0,ac=null;\\nvar XA=(new URLSearchParams(location.search)).get('x')||'';\\nfunction now(){return new Date().toLocaleTimeString('vi-VN',{hour12:false});}\\nfunction log(m,a){var l=document.getElementById('log');var d=document.createElement('div');\\n  if(a)d.className='a';d.textContent='['+now()+'] '+m;l.insertBefore(d,l.firstChild);\\n  while(l.children.length>60)l.removeChild(l.lastChild);}\\nsetInterval(function(){document.getElementById('clk').textContent=now();},1000);\\n\\nfunction chime(){ if(!ac)return;\\n  [880,660].forEach(function(f,i){ var o=ac.createOscillator(),g=ac.createGain();\\n    o.connect(g);g.connect(ac.destination);o.frequency.value=f;o.type='sine';\\n    var t=ac.currentTime+i*0.42; g.gain.setValueAtTime(0.0001,t);\\n    g.gain.exponentialRampToValueAtTime(0.28,t+0.04); g.gain.exponentialRampToValueAtTime(0.0001,t+0.4);\\n    o.start(t);o.stop(t+0.42); }); }\\n\\nfunction pickVoice(){ var vs=window.speechSynthesis?speechSynthesis.getVoices():[];\\n  var v=vs.filter(function(x){return /vi[-_]VN|Vietnamese/i.test(x.lang+' '+x.name);})[0];\\n  document.getElementById('voice').textContent = v\\n    ? 'Giọng tiếng Việt: '+v.name+' ✓  (tiếng Mông/Thái dùng file mp3 thu sẵn — điền audio_url trong n8n)'\\n    : '⚠ Không tìm thấy giọng tiếng Việt trên máy này. Dùng Chrome/Edge trên Windows hoặc Android, hoặc điền audio_url mp3 thu sẵn trong n8n.';\\n  return v; }\\nif(window.speechSynthesis){ speechSynthesis.onvoiceschanged=pickVoice; setTimeout(pickVoice,400); }\\n\\nfunction say(text,times,audioUrl){\\n  if(!armed)return;\\n  if(audioUrl){ var n=0; var a=new Audio(audioUrl);\\n    a.onended=function(){ n++; if(n<times){ a.currentTime=0; a.play(); } };\\n    a.onerror=function(){ log('✗ Lỗi tải mp3, chuyển sang giọng máy tiếng Việt'); say(text,times,''); };\\n    chime(); setTimeout(function(){a.play();},900); return; }\\n  if(!window.speechSynthesis){ log('✗ Thiết bị không hỗ trợ đọc tự động'); return; }\\n  speechSynthesis.cancel(); chime();\\n  setTimeout(function(){\\n    for(var i=0;i<times;i++){ var u=new SpeechSynthesisUtterance(text);\\n      u.lang='vi-VN'; u.rate=0.8; u.volume=1; var v=pickVoice(); if(v)u.voice=v;\\n      if(i===times-1)u.onend=function(){ log('✓ Phát xong '+times+' lượt'); };\\n      speechSynthesis.speak(u); }\\n  },900);\\n}\\ndocument.getElementById('arm').onclick=function(){\\n  try{ ac=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){}\\n  if(ac&&ac.state==='suspended')ac.resume();\\n  if(window.speechSynthesis){ var w=new SpeechSynthesisUtterance(' '); speechSynthesis.speak(w); }\\n  armed=true; this.classList.add('on'); this.textContent='✓ LOA ĐÃ SẴN SÀNG';\\n  document.getElementById('led').className='led ok';\\n  document.getElementById('stx').textContent='ĐANG TRỰC — poll hệ thống mỗi 8 giây';\\n  log('Trạm loa đã kích hoạt, bắt đầu trực'); pickVoice(); poll();\\n};\\ndocument.getElementById('test').onclick=function(){\\n  if(!armed){alert('Bấm KÍCH HOẠT LOA trước.');return;}\\n  log('Phát thử'); say('Đây là bản tin thử của trạm loa bản. Hệ thống cảnh báo sớm Aether đang hoạt động bình thường.',1,''); };\\ndocument.getElementById('stop').onclick=function(){ if(window.speechSynthesis)speechSynthesis.cancel(); log('Đã dừng phát'); };\\n\\nfunction poll(){\\n  fetch('./aether-loa'+(XA?('?x='+XA):''),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){\\n    document.getElementById('led').className='led ok';\\n    if(s&&s.ts&&s.ts!==lastTs){\\n      lastTs=s.ts;\\n      var cd=document.getElementById('card'); cd.className='card live'+(s.lv==='CRITICAL'?' crit':(s.lv==='WARNING'?' warn':''));\\n      document.getElementById('led').className='led live';\\n      document.getElementById('ttl').textContent=(s.kind==='ban_tin_sang'?'☀ ':(s.lv==='CRITICAL'?'🔴 ':'🟠 '))+(s.title||'Bản tin')+' — '+(s.name||'');\\n      document.getElementById('scr').textContent=s.loa_script||'';\\n      var lanPhat = (s.kind==='ban_tin_sang') ? 1 : 3;\\n      var nhan = (s.kind==='ban_tin_sang') ? '☀ Bản tin sáng' : '★ CẢNH BÁO '+s.lv+' / '+s.rt;\\n      log(nhan+' tại '+(s.name||'')+' — phát loa '+lanPhat+' lượt', s.kind!=='ban_tin_sang');\\n      say(s.loa_script||'',lanPhat,s.audio_url||'');\\n    }\\n  }).catch(function(){ document.getElementById('led').className='led'; log('✗ Mất kết nối tới hệ thống'); })\\n  .then(function(){ setTimeout(poll,8000); });\\n}\\n</script>\\n</body></html>\";\nreturn [{ json: { html } }];"
+      },
+      "id": "f8787ad7-c64b-411e-a234-562240db08c2",
+      "name": "Render Loa Client",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        2288
+      ],
+      "notes": "⭐ TRẠM LOA BLUETOOTH. Bắt buộc bấm KÍCH HOẠT (trình duyệt chặn autoplay audio khi chưa có thao tác người dùng)."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "f2b4fb4e-789d-4040-969a-4484baac14db",
+      "name": "Respond Loa Client",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        2288
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "aether-simulate",
+        "options": {}
+      },
+      "id": "41f241ab-16eb-4e73-9af1-0c9833ac6111",
+      "name": "Webhook /simulate",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2464
+      ],
+      "webhookId": "fb70416f-ee50-4c18-9c31-b8c1bb94edca"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction parseCSV(text){\n  const rows=[];let row=[],cur='',q=false;\n  for(let i=0;i<text.length;i++){const c=text[i];\n    if(q){if(c==='\"'){if(text[i+1]==='\"'){cur+='\"';i++;}else q=false;}else cur+=c;}\n    else if(c==='\"')q=true;\n    else if(c===','){row.push(cur);cur='';}\n    else if(c==='\\n'){row.push(cur);rows.push(row);row=[];cur='';}\n    else if(c!=='\\r')cur+=c;}\n  if(cur!==''||row.length){row.push(cur);rows.push(row);}\n  if(!rows.length)return[];\n  const hdr=rows.shift().map(h=>h.trim().replace(/^\\ufeff/,''));\n  return rows.filter(r=>r.some(v=>String(v).trim()!==''))\n    .map(r=>{const o={};hdr.forEach((h,i)=>o[h]=String(r[i]==null?'':r[i]).trim());return o;});\n}\nconst num = v => { const n = parseFloat(String(v==null?'':v).replace(',','.')); return isFinite(n)?n:null; };\n\n// DEMO MODE — bơm kịch bản vào ĐẦU pipeline. Consensus/RAG/Agent phía sau chạy THẬT.\n// Body: { \"scenario\":\"flood|landslide|frost|fog\", \"xa_id\":\"tua_thang\" }\nconst b = ($json.body)||{};\nconst sc = b.scenario || 'flood';\nlet sd={}; try { sd = $getWorkflowStaticData('global'); } catch(e){}\nconst reg = sd.registry;\nif (!reg) throw new Error('Chưa có registry — chạy pipeline chính (hoặc Execute node \"Dựng điểm đo\") ít nhất 1 lần trước khi simulate.');\n\nconst target = b.xa_id || reg.points[0].xa_id;\nif (!reg.communes[target]) throw new Error('xa_id \"' + target + '\" không có trong sổ địa bàn. Các mã hợp lệ: ' + Object.keys(reg.communes).slice(0,8).join(', ') + '…');\n\nconst P = { flood:{rain:80,soil:92,tmin:22,vis:5000,q:2.7},\n            landslide:{rain:60,soil:94,tmin:22,vis:5000,q:1.2},\n            frost:{rain:2,soil:40,tmin:-1,vis:4000,q:0.9},\n            fog:{rain:1,soil:45,tmin:12,vis:30,q:0.8} }[sc] || {rain:80,soil:92,tmin:22,vis:5000,q:2.7};\n\n// chỉ ĐIỂM XẤU NHẤT của xã đích bị bơm -> chứng minh cơ chế quy về xã theo max hoạt động\nconst hitPoint = reg.points.filter(p=>p.xa_id===target)[0].point_id;\nconst points = reg.points.map(p => {\n  const hit = p.point_id===hitPoint;\n  return { ...p,\n    forecast_next24: hit?P.rain:3, soilNow: hit?P.soil:45, t_min_next24: hit?P.tmin:19,\n    vis_min: hit?P.vis:8000, qRatio: hit?P.q:0.9, bias_mm: 0, bias_per_day: 0, daily:null };\n});\nreturn [{ json:{ __simulated:true, scenario:sc, target_xa:target, registry:reg, points } }];"
+      },
+      "id": "60fe91cb-2ed9-4b16-8865-f320aed0d023",
+      "name": "Build Simulated Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        2464
+      ],
+      "notes": "4 kịch bản: flood|landslide|frost|fog. Bơm vào ĐẦU Consensus -> mọi tầng sau chạy THẬT."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "aether-register",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "58c6e1ff-394c-452d-b25d-dfc026956113",
+      "name": "Webhook /register",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2640
+      ],
+      "webhookId": "ad52b1cf-067f-452d-ba88-ac7ad1c42361"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Đăng ký nhận tin — trả lời bài toán \"thu thập vị trí người dùng\" mà KHÔNG cần GPS.\n// Đơn vị cá nhân hóa là BẢN/XÃ (tĩnh, cán bộ bản biết rõ), không phải toạ độ.\n// Body: { \"so_dien_thoai\":\"09...\", \"ho_ten\":\"...\", \"xa_id\":\"tua_thang\", \"ban\":\"Bản Tủa Thàng\",\n//         \"vai_tro\":\"dan\", \"ngon_ngu\":\"hmong\", \"sinh_ke\":\"ngo_nuong\" }\nconst b = ($json.body)||{};\nconst XA = ['tua_thang','muong_nhe','sin_thau'];\nconst errs = [];\nconst phone = String(b.so_dien_thoai||'').replace(/[^0-9+]/g,'');\nif (!/^(0|\\+84)[0-9]{9}$/.test(phone)) errs.push('so_dien_thoai không hợp lệ');\nif (!XA.includes(b.xa_id)) errs.push('xa_id phải thuộc: ' + XA.join(', '));\nif (!b.ban) errs.push('thiếu ban');\nif (errs.length) return [{ json:{ ok:false, errors:errs } }];\n\nconst rec = { id:'REG'+Date.now().toString(36).toUpperCase(), ho_ten:b.ho_ten||'', so_dien_thoai:phone,\n  xa_id:b.xa_id, ban:b.ban, vai_tro:(b.vai_tro==='can_bo_ban'?'can_bo_ban':'dan'),\n  ngon_ngu:['vi','hmong','thai'].includes(b.ngon_ngu)?b.ngon_ngu:'vi',\n  sinh_ke:b.sinh_ke||'khac', lat:b.lat||'', lon:b.lon||'', trang_thai:'active',\n  registered_at:new Date().toISOString() };\n\n// MVP: lưu tạm vào static data. PRODUCTION: bật node \"Google Sheets — Ghi danh bạ\" bên cạnh (cần OAuth).\ntry {\n  const sd = $getWorkflowStaticData('global');\n  sd.pendingRegistrations = sd.pendingRegistrations || [];\n  sd.pendingRegistrations.push(rec);\n} catch(e){}\n\nreturn [{ json:{ ok:true, record:rec,\n  note:'Đã ghi nhận. MVP lưu vào static data; bản triển khai ghi thẳng vào Google Sheet DanhBa.' } }];"
+      },
+      "id": "84154b05-547f-4372-a79c-fc50c5efa9b2",
+      "name": "Ghi danh cư dân",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        2640
+      ],
+      "notes": "Đơn vị cá nhân hoá là BẢN/XÃ (tĩnh, cán bộ bản biết rõ), KHÔNG cần GPS."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "1a58adbf-fd9d-49f3-aa14-907a709c4119",
+      "name": "Respond Register",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        2640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// --- HÀM TIỆN ÍCH ---\nfunction toE164(sdt){\n  var s=String(sdt==null?'':sdt).replace(/[^0-9+]/g,'');\n  if(s.indexOf('+')===0)return s;\n  if(s.indexOf('84')===0&&s.length>=11)return '+'+s;\n  if(s.indexOf('0')===0)return '+84'+s.slice(1);\n  if(s.length===9)return '+84'+s;\n  return s;\n}\nfunction stripVn(s){return String(s==null?'':s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D');}\nfunction r0(x){return (x==null||isNaN(x))?null:Math.round(x);}\nfunction dm(dstr){ if(!dstr)return ''; var p=String(dstr).split('-'); return p.length===3?(p[2]+'/'+p[1]):''; }\n\n// Dịch SỐ sang LỜI để bà con hình dung được (giữ cả số lẫn lời)\nfunction muaThanhLoi(mm){\n  if(mm==null) return '';\n  if(mm<1)  return 'hau nhu khong mua';\n  if(mm<16) return 'mua khong lon ('+Math.round(mm)+'mm)';\n  if(mm<30) return 'mua kha ('+Math.round(mm)+'mm)';\n  if(mm<50) return 'MUA TO ('+Math.round(mm)+'mm)';\n  return 'MUA RAT TO ('+Math.round(mm)+'mm), de gay lu';\n}\nfunction nhietThanhLoi(thap,cao){\n  var t=r0(thap), c=r0(cao);\n  if(t==null||c==null) return '';\n  var loi='';\n  if(t<8)  loi=' (ret dam, nho giu am)';\n  else if(t<13) loi=' (troi lanh)';\n  else if(c>34) loi=' (nong)';\n  return t+'-'+c+' do'+loi;\n}\n\nconst CONFIG={ BASE_URL:'https://n8n.phaco.com.vn/webhook', SMS_MAX_SEGMENTS:4 };\n\nconst groups=$('Nhóm sinh kế + soạn prompt').all().map(i=>i.json);\nconst replies=$input.all().map(i=>i.json);\nconst out=[];\n\nfor(let i=0;i<groups.length;i++){\n  const g=groups[i];\n  if(g.__skip)continue;\n\n  let raw=((((replies[i]||{}).choices||[])[0]||{}).message||{}).content||'';\n  const rc=((((replies[i]||{}).choices||[])[0]||{}).message||{}).reasoning_content;\n  if(!raw && rc) raw=rc;\n  let clean=String(raw).replace(/```json/g,'').replace(/```/g,'').trim();\n  const s=clean.indexOf('{'),e=clean.lastIndexOf('}');\n  if(s!==-1&&e!==-1)clean=clean.substring(s,e+1);\n  let r; try{r=JSON.parse(clean);}catch(err){r={};}\n  let kn=r.khuyen_nghi||'nho xem troi truoc khi di lam';\n  kn=String(kn).trim().replace(/[.。]+$/,'');\n  kn=kn.charAt(0).toUpperCase()+kn.slice(1);\n\n  const w=g.weather_facts||{};\n  const shortName=String(g.xa_name||'').replace(/^(Xã|Phường) /,'').replace(/\\s*\\(.*\\)$/,'');\n  const link=CONFIG.BASE_URL+'/aether-view?x='+g.xa_id;\n\n  var troi=stripVn(w.troi||'thay doi');\n  var nhiet=nhietThanhLoi(w.thap,w.cao);\n  var mua=muaThanhLoi(w.mua_mm);\n  // ghép mô tả thời tiết: \"troi mua phun, mua nho (12mm), 24-27 do\"\n  var moTa=[troi, mua, nhiet].filter(Boolean).join(', ');\n\n  // Xu hướng nói kiểu dặn dò\n  var xuhuong='';\n  if(w.mua_3ngay && w.mua_3ngay.length>=3){\n    var a=w.mua_3ngay[0]||0, cc=w.mua_3ngay[2]||0;\n    if(cc>a+5) xuhuong=' May ngay toi mua se nang hon, ba con luu y.';\n    else if(cc<a-5) xuhuong=' May ngay toi mua se ngot dan.';\n  }\n\n  for(const p of g.recipients){\n    // Cảnh báo (nếu có) — nói thẳng, khẩn\n    var canhBao='';\n    if(g.alert_level && g.alert_level!=='SAFE'){\n      var loaiVN={flood:'nguy co lu quet',landslide:'nguy co sat lo',frost:'ret hai',fog:'suong mu day'}[g.risk_type]||'thoi tiet nguy hiem';\n      canhBao=' CANH BAO: '+stripVn(loaiVN)+', ba con het suc chu y!';\n    }\n\n    // Tin giọng gần gũi: \"Ba con [ban] o [xa] oi, hom nay [thoi tiet]. [khuyen nghi]. [canh bao] Xem: [link]\"\n    var text=stripVn(\n      'Ba con '+shortName+' oi! '\n      + 'Hom nay '+dm(w.ngay)+' '+moTa+'. '\n      + kn+'.'\n      + xuhuong\n      + canhBao+' '\n      + 'Xem chi tiet 7 ngay: '+link\n    );\n\n    out.push({ json:{\n      to:toE164(p.to), ho_ten:p.ho_ten, ban:p.ban, xa_id:g.xa_id, vai_tro:p.vai_tro,\n      message:text, len:text.length, segments:Math.ceil(text.length/153),\n      loai:'ban_tin_sang', alert_level:g.alert_level||'SAFE'\n    }});\n  }\n}\n\n// ===== GHI BẢN TIN ĐỌC LOA THEO XÃ (chung 1 lần/sáng) =====\ntry {\n  const sd=$getWorkflowStaticData('global'); sd.loaMorning=sd.loaMorning||{};\n  const seen={};\n  for(const g of groups){\n    if(g.__skip||seen[g.xa_id])continue; seen[g.xa_id]=true;\n    const w=g.weather_facts||{};\n    const sn=String(g.xa_name||'').replace(/^(Xã|Phường) /,'');\n    let troi=w.troi||'thay đổi';\n    let nhiet=(w.thap!=null&&w.cao!=null)?('nhiệt độ từ '+Math.round(w.thap)+' đến '+Math.round(w.cao)+' độ'):'';\n    let mua='';\n    if(w.mua_mm!=null){ if(w.mua_mm<1)mua='hầu như không mưa'; else if(w.mua_mm<16)mua='có mưa nhỏ';\n      else if(w.mua_mm<30)mua='có mưa'; else if(w.mua_mm<50)mua='có mưa to'; else mua='có mưa rất to, đề phòng lũ'; }\n    const cb=(g.alert_level&&g.alert_level!=='SAFE')\n      ?(' Đặc biệt chú ý, hôm nay có nguy cơ '+({flood:'lũ quét',landslide:'sạt lở đất',frost:'rét hại',fog:'sương mù dày'}[g.risk_type]||'thời tiết nguy hiểm')+', bà con hết sức cẩn thận.'):'';\n    const script='Bà con '+sn+' chú ý. Bản tin thời tiết sáng nay. Hôm nay trời '+troi+', '\n      +[mua,nhiet].filter(Boolean).join(', ')+'.'+cb+' Bà con nhớ xem thời tiết trước khi đi làm. Xin cảm ơn.';\n    sd.loaMorning[g.xa_id]={ ts:Math.floor(Date.now()/1000), loc:g.xa_id, name:g.xa_name,\n      lv:g.alert_level||'SAFE', title:'Bản tin sáng '+sn, loa_script:script, audio_url:'' };\n  }\n}catch(e){}\n\nreturn out.length>0?out:[{ json:{ __empty:true } }];"
+      },
+      "id": "2f62aa9a-1c2b-4893-9beb-3bea0a3906e0",
+      "name": "Build SMS bản tin sáng",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        1344
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule 1 giờ": {
+      "main": [
+        [
+          {
+            "node": "Đọc địa bàn (DiaBan)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc địa bàn (DiaBan)": {
+      "main": [
+        [
+          {
+            "node": "Đọc điểm đo (DiemDo)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc điểm đo (DiemDo)": {
+      "main": [
+        [
+          {
+            "node": "Dựng điểm đo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dựng điểm đo": {
+      "main": [
+        [
+          {
+            "node": "Open-Meteo Forecast",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open-Meteo Forecast": {
+      "main": [
+        [
+          {
+            "node": "Open-Meteo Flood",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open-Meteo Flood": {
+      "main": [
+        [
+          {
+            "node": "Consensus Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consensus Engine": {
+      "main": [
+        [
+          {
+            "node": "Xã cần xác minh",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Xã cần xác minh": {
+      "main": [
+        [
+          {
+            "node": "OpenWeatherMap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenWeatherMap": {
+      "main": [
+        [
+          {
+            "node": "Xác minh OpenWeatherMap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Xác minh OpenWeatherMap": {
+      "main": [
+        [
+          {
+            "node": "Có cảnh báo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Có cảnh báo?": {
+      "main": [
+        [
+          {
+            "node": "Split Alerts + RAG mini",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Không cảnh báo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Alerts + RAG mini": {
+      "main": [
+        [
+          {
+            "node": "AI Agent 1 — Risk Analyst",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent 1 — Risk Analyst": {
+      "main": [
+        [
+          {
+            "node": "Parse Agent 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Agent 1": {
+      "main": [
+        [
+          {
+            "node": "AI Agent 2 — Bulletin Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent 2 — Bulletin Generator": {
+      "main": [
+        [
+          {
+            "node": "Build Alert Payload + Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Alert Payload + Link": {
+      "main": [
+        [
+          {
+            "node": "Gửi Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Đọc danh bạ dân cư",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc danh bạ dân cư": {
+      "main": [
+        [
+          {
+            "node": "Ghép người nhận",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ghép người nhận": {
+      "main": [
+        [
+          {
+            "node": "Gửi SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule 02:00 (bias)": {
+      "main": [
+        [
+          {
+            "node": "Đọc địa bàn (bias)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc địa bàn (bias)": {
+      "main": [
+        [
+          {
+            "node": "Điểm hiệu chuẩn (cấp xã)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Điểm hiệu chuẩn (cấp xã)": {
+      "main": [
+        [
+          {
+            "node": "ERA5 archive (bias)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ERA5 archive (bias)": {
+      "main": [
+        [
+          {
+            "node": "Open-Meteo lịch sử (bias)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open-Meteo lịch sử (bias)": {
+      "main": [
+        [
+          {
+            "node": "Tính bias & lưu cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule 05:00": {
+      "main": [
+        [
+          {
+            "node": "Đọc danh bạ (bản tin sáng)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc danh bạ (bản tin sáng)": {
+      "main": [
+        [
+          {
+            "node": "Nhóm sinh kế + soạn prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nhóm sinh kế + soạn prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Agent 3 — Khuyến nông",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent 3 — Khuyến nông": {
+      "main": [
+        [
+          {
+            "node": "Build SMS bản tin sáng",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook /forecast": {
+      "main": [
+        [
+          {
+            "node": "Đọc cache dự báo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc cache dự báo": {
+      "main": [
+        [
+          {
+            "node": "Respond Forecast",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook /view": {
+      "main": [
+        [
+          {
+            "node": "Render Webview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Webview": {
+      "main": [
+        [
+          {
+            "node": "Respond Webview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook /sw": {
+      "main": [
+        [
+          {
+            "node": "Render Service Worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Service Worker": {
+      "main": [
+        [
+          {
+            "node": "Respond SW",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook /loa": {
+      "main": [
+        [
+          {
+            "node": "Đọc trạng thái loa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc trạng thái loa": {
+      "main": [
+        [
+          {
+            "node": "Respond Loa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook /loa-client": {
+      "main": [
+        [
+          {
+            "node": "Render Loa Client",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Loa Client": {
+      "main": [
+        [
+          {
+            "node": "Respond Loa Client",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook /simulate": {
+      "main": [
+        [
+          {
+            "node": "Build Simulated Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Simulated Data": {
+      "main": [
+        [
+          {
+            "node": "Consensus Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook /register": {
+      "main": [
+        [
+          {
+            "node": "Ghi danh cư dân",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ghi danh cư dân": {
+      "main": [
+        [
+          {
+            "node": "Respond Register",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build SMS bản tin sáng": {
+      "main": [
+        [
+          {
+            "node": "Gửi SMS (bản tin sáng)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9cd474a3-5715-4bc8-aed4-7c69849d9429",
+  "meta": {
+    "instanceId": "1ef7b1f0298fe5b59696a3847a611b1c3f877a2fe9788253057958e4f4741624"
+  },
+  "id": "dZh5zTTFvoGGMX7A",
+  "tags": []
+}

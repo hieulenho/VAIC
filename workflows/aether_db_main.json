@@ -223,7 +223,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer sk-gy9l_NWmwjIQBvu-ySPEFfzSbmVxkJYgLVRFp3t1UKw="
+              "value": "Bearer API_KEY"
             },
             {
               "name": "Content-Type",
@@ -269,7 +269,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer sk-gy9l_NWmwjIQBvu-ySPEFfzSbmVxkJYgLVRFp3t1UKw="
+              "value": "Bearer API_KEY"
             },
             {
               "name": "Content-Type",
@@ -574,7 +574,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer sk-gy9l_NWmwjIQBvu-ySPEFfzSbmVxkJYgLVRFp3t1UKw="
+              "value": "Bearer API_KEY"
             },
             {
               "name": "Content-Type",
